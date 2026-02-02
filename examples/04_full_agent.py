@@ -20,7 +20,6 @@ from mini_agent.tools import BashTool, EditTool, ReadTool, WriteTool
 from mini_agent.tools.mcp_loader import load_mcp_tools_async
 from mini_agent.tools.note_tool import RecallNoteTool, SessionNoteTool
 
-
 async def demo_full_agent():
     """Demo: Full-featured agent with all capabilities."""
     print("\n" + "=" * 60)
@@ -170,7 +169,6 @@ You have record_note and recall_notes tools. Use them to:
             # Show memory
             if memory_file.exists():
                 import json
-
                 notes = json.loads(memory_file.read_text())
                 print(f"\n💾 Session notes recorded: {len(notes)}")
                 for note in notes:
@@ -179,9 +177,7 @@ You have record_note and recall_notes tools. Use them to:
         except Exception as e:
             print(f"❌ Error during agent execution: {e}")
             import traceback
-
             traceback.print_exc()
-
 
 async def demo_interactive_mode():
     """Demo: Interactive conversation with agent."""
@@ -247,7 +243,6 @@ async def demo_interactive_mode():
             except Exception as e:
                 print(f"Error: {e}")
                 break
-
 
 async def main():
     """Run all demos."""

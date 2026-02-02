@@ -3,23 +3,20 @@
 This example demonstrates how to use the Tool base class and its schema methods.
 """
 
+import yaml
 import asyncio
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from mini_agent import LLMClient, LLMProvider
 from mini_agent.schema import Message
 from mini_agent.tools.base import Tool, ToolResult
-
 
 def load_config():
     """Load config from config.yaml."""
     config_path = Path("mini_agent/config/config.yaml")
     with open(config_path, encoding="utf-8") as f:
         return yaml.safe_load(f)
-
 
 class WeatherTool(Tool):
     """Example weather tool."""
@@ -54,7 +51,6 @@ class WeatherTool(Tool):
         """Mock execute method."""
         return ToolResult(success=True, content="Weather data")
 
-
 class SearchTool(Tool):
     """Example search tool."""
 
@@ -87,7 +83,6 @@ class SearchTool(Tool):
         """Mock execute method."""
         return ToolResult(success=True, content="Search results")
 
-
 class CalculatorTool(Tool):
     """Example calculator tool."""
 
@@ -115,7 +110,6 @@ class CalculatorTool(Tool):
     async def execute(self, **kwargs) -> ToolResult:
         """Mock execute method."""
         return ToolResult(success=True, content="Calculation result")
-
 
 class TranslateTool(Tool):
     """Example translate tool."""
@@ -149,7 +143,6 @@ class TranslateTool(Tool):
         """Mock execute method."""
         return ToolResult(success=True, content="Translation result")
 
-
 async def demo_tool_schemas():
     """Demonstrate using Tool objects with LLM."""
     config = load_config()
@@ -163,10 +156,16 @@ async def demo_tool_schemas():
     search_tool = SearchTool()
 
     # Create client
+    # client = LLMClient(
+    #     api_key=config["api_key"],
+    #     provider=LLMProvider.ANTHROPIC,
+    #     model="MiniMax-M2.1",
+    # )
     client = LLMClient(
         api_key=config["api_key"],
-        provider=LLMProvider.ANTHROPIC,
-        model="MiniMax-M2.1",
+        api_base=config["api_base"],
+        provider=config["provider"],
+        model=config["model"],
     )
 
     # Test with a query that should trigger weather tool
@@ -212,10 +211,16 @@ async def demo_multiple_tools():
     calculator_tool = CalculatorTool()
     translate_tool = TranslateTool()
 
+    # client = LLMClient(
+    #     api_key=config["api_key"],
+    #     provider=LLMProvider.ANTHROPIC,
+    #     model="MiniMax-M2.1",
+    # )
     client = LLMClient(
         api_key=config["api_key"],
-        provider=LLMProvider.ANTHROPIC,
-        model="MiniMax-M2.1",
+        api_base=config["api_base"],
+        provider=config["provider"],
+        model=config["model"],
     )
 
     messages = [Message(role="user", content="Calculate 15 * 23 for me")]

@@ -17,7 +17,6 @@ from mini_agent.config import Config
 from mini_agent.tools import BashTool, ReadTool, WriteTool
 from mini_agent.tools.note_tool import RecallNoteTool, SessionNoteTool
 
-
 async def demo_direct_note_usage():
     """Demo: Direct usage of Session Note tools."""
     print("\n" + "=" * 60)
@@ -227,7 +226,6 @@ Guidelines:
         except Exception as e:
             print(f"❌ Error: {e}")
 
-
 async def main():
     """Run all demos."""
     print("=" * 60)
@@ -244,7 +242,6 @@ async def main():
     print("\n" + "=" * 60)
     print("All demos completed! ✅")
     print("=" * 60)
-
 
 if __name__ == "__main__":
     asyncio.run(main())

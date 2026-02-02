@@ -15,7 +15,6 @@ from pathlib import Path
 
 from mini_agent.tools import BashTool, EditTool, ReadTool, WriteTool
 
-
 async def demo_write_tool():
     """Demo: Write a new file."""
     print("\n" + "=" * 60)
@@ -35,7 +34,6 @@ async def demo_write_tool():
             print(f"Content:\n{file_path.read_text()}")
         else:
             print(f"❌ Failed: {result.error}")
-
 
 async def demo_read_tool():
     """Demo: Read a file."""

@@ -15,7 +15,6 @@ from mini_agent.agent import Agent
 from mini_agent.config import Config
 from mini_agent.tools import BashTool, EditTool, ReadTool, WriteTool
 
-
 async def demo_file_creation():
     """Demo: Agent creates a file based on user request."""
     print("\n" + "=" * 60)
@@ -87,6 +86,8 @@ async def demo_file_creation():
         agent.add_user_message(task)
 
         try:
+            # liujia: agent executes some loop of thinking/executing/checking
+            # to complete this task
             result = await agent.run()
 
             print("\n" + "=" * 60)
@@ -108,9 +109,7 @@ async def demo_file_creation():
         except Exception as e:
             print(f"❌ Error: {e}")
             import traceback
-
             traceback.print_exc()
-
 
 async def demo_bash_task():
     """Demo: Agent executes bash commands."""
@@ -188,7 +187,6 @@ async def demo_bash_task():
 
         except Exception as e:
             print(f"❌ Error: {e}")
-
 
 async def main():
     """Run all demos."""

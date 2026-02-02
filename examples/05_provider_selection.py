@@ -4,14 +4,15 @@ This example demonstrates how to use the LLMClient wrapper with different
 LLM providers (Anthropic or OpenAI) through the provider parameter.
 """
 
-import asyncio
 import os
-from pathlib import Path
-
 import yaml
+import asyncio
+from pathlib import Path
 
 from mini_agent import LLMClient, LLMProvider, Message
 
+# MODEL_NAME= "MiniMax-M2.1"
+MODEL_NAME = "kimi-k2.5"
 
 async def demo_anthropic_provider():
     """Demo using LLMClient with Anthropic provider."""
@@ -28,7 +29,7 @@ async def demo_anthropic_provider():
     client = LLMClient(
         api_key=config["api_key"],
         provider=LLMProvider.ANTHROPIC,  # Specify Anthropic provider
-        model=config.get("model", "MiniMax-M2.1"),
+        model=config.get("model", MODEL_NAME),
     )
 
     print(f"Provider: {client.provider}")
@@ -47,7 +48,6 @@ async def demo_anthropic_provider():
     except Exception as e:
         print(f"❌ Error: {e}")
 
-
 async def demo_openai_provider():
     """Demo using LLMClient with OpenAI provider."""
     print("\n" + "=" * 60)
@@ -63,7 +63,7 @@ async def demo_openai_provider():
     client = LLMClient(
         api_key=config["api_key"],
         provider=LLMProvider.OPENAI,  # Specify OpenAI provider
-        model=config.get("model", "MiniMax-M2.1"),
+        model=config.get("model", MODEL_NAME),
     )
 
     print(f"Provider: {client.provider}")
@@ -82,7 +82,6 @@ async def demo_openai_provider():
     except Exception as e:
         print(f"❌ Error: {e}")
 
-
 async def demo_default_provider():
     """Demo using LLMClient with default provider."""
     print("\n" + "=" * 60)
@@ -97,7 +96,7 @@ async def demo_default_provider():
     # Initialize client without specifying provider (defaults to Anthropic)
     client = LLMClient(
         api_key=config["api_key"],
-        model=config.get("model", "MiniMax-M2.1"),
+        model=config.get("model", MODEL_NAME),
     )
 
     print(f"Provider (default): {client.provider}")
@@ -114,7 +113,6 @@ async def demo_default_provider():
     except Exception as e:
         print(f"❌ Error: {e}")
 
-
 async def demo_provider_comparison():
     """Compare responses from both providers."""
     print("\n" + "=" * 60)
@@ -130,13 +128,13 @@ async def demo_provider_comparison():
     anthropic_client = LLMClient(
         api_key=config["api_key"],
         provider=LLMProvider.ANTHROPIC,
-        model=config.get("model", "MiniMax-M2.1"),
+        model=config.get("model", MODEL_NAME),
     )
 
     openai_client = LLMClient(
         api_key=config["api_key"],
         provider=LLMProvider.OPENAI,
-        model=config.get("model", "MiniMax-M2.1"),
+        model=config.get("model", MODEL_NAME),
     )
 
     # Same question for both

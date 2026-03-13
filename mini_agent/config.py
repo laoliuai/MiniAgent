@@ -3,10 +3,17 @@
 Provides unified configuration loading and management functionality
 """
 
+from enum import Enum
 from pathlib import Path
 
 import yaml
 from pydantic import BaseModel, Field
+
+
+class LogLevel(str, Enum):
+    MINIMAL = "minimal"
+    STANDARD = "standard"
+    VERBOSE = "verbose"
 
 
 class RetryConfig(BaseModel):
@@ -45,6 +52,13 @@ class MCPConfig(BaseModel):
     sse_read_timeout: float = 120.0  # SSE read timeout (seconds)
 
 
+class LoggingConfig(BaseModel):
+    """Logging configuration"""
+    file_level: LogLevel = LogLevel.STANDARD
+    console_level: LogLevel = LogLevel.MINIMAL
+    max_files: int = 50
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration"""
 
@@ -52,6 +66,8 @@ class ToolsConfig(BaseModel):
     enable_file_tools: bool = True
     enable_bash: bool = True
     enable_note: bool = True
+    enable_grep: bool = True
+    enable_todo: bool = True
 
     # Skills
     enable_skills: bool = True
@@ -69,6 +85,7 @@ class Config(BaseModel):
     llm: LLMConfig
     agent: AgentConfig
     tools: ToolsConfig
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
     @classmethod
     def load(cls) -> "Config":
@@ -150,6 +167,8 @@ class Config(BaseModel):
             enable_file_tools=tools_data.get("enable_file_tools", True),
             enable_bash=tools_data.get("enable_bash", True),
             enable_note=tools_data.get("enable_note", True),
+            enable_grep=tools_data.get("enable_grep", True),
+            enable_todo=tools_data.get("enable_todo", True),
             enable_skills=tools_data.get("enable_skills", True),
             skills_dir=tools_data.get("skills_dir", "./skills"),
             enable_mcp=tools_data.get("enable_mcp", True),
@@ -157,10 +176,19 @@ class Config(BaseModel):
             mcp=mcp_config,
         )
 
+        # Parse logging configuration
+        logging_data = data.get("logging", {})
+        logging_config = LoggingConfig(
+            file_level=logging_data.get("file_level", "standard"),
+            console_level=logging_data.get("console_level", "minimal"),
+            max_files=logging_data.get("max_files", 50),
+        )
+
         return cls(
             llm=llm_config,
             agent=agent_config,
             tools=tools_config,
+            logging=logging_config,
         )
 
     @staticmethod

@@ -44,7 +44,9 @@ tools:
   enable_file_tools: true  # File read/write/edit tools (ReadTool, WriteTool, EditTool)
   enable_bash: true        # Bash command execution tool
   enable_note: true        # Session note tool (SessionNoteTool)
-  
+  enable_grep: true        # Grep search tool (GrepTool)
+  enable_todo: true        # Todo task tracking tool (TodoTool)
+
   # Claude Skills
   enable_skills: true      # Enable Skills
   skills_dir: "./skills"   # Skills directory path
@@ -58,3 +60,9 @@ tools:
     connect_timeout: 10.0    # Connection timeout in seconds (default: 10)
     execute_timeout: 60.0    # Tool execution timeout in seconds (default: 60)
     sse_read_timeout: 120.0  # SSE read timeout in seconds (default: 120)
+
+# ===== Logging Configuration =====
+logging:
+  file_level: "standard"     # minimal / standard / verbose
+  console_level: "minimal"   # minimal / standard / verbose
+  max_files: 50              # Maximum log files to retain

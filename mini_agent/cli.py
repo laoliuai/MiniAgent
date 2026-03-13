@@ -18,6 +18,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import List
 
 from prompt_toolkit import PromptSession
@@ -30,7 +31,7 @@ from prompt_toolkit.styles import Style
 from mini_agent import LLMClient
 from mini_agent.agent import Agent
 from mini_agent.config import Config
-from mini_agent.schema import LLMProvider
+from mini_agent.schema import LLMProvider, StreamEventType
 from mini_agent.tools.base import Tool
 from mini_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from mini_agent.tools.file_tools import EditTool, ReadTool, WriteTool
@@ -483,6 +484,99 @@ async def _quiet_cleanup():
         pass
 
 
+# Track step timing at module level for _render_stream_event
+_step_start_time = 0.0
+_run_start_time = 0.0
+_thinking_started = False
+_text_started = False
+
+
+def _render_stream_event(event):
+    """Render a StreamEvent to the terminal."""
+    global _step_start_time, _run_start_time, _thinking_started, _text_started
+
+    BOX_WIDTH = 58
+
+    match event.type:
+        case StreamEventType.STEP_START:
+            _step_start_time = perf_counter()
+            if event.step == 1:
+                _run_start_time = perf_counter()
+            _thinking_started = False
+            _text_started = False
+
+            step_text = f"{Colors.BOLD}{Colors.BRIGHT_CYAN}💭 Step {event.step}{Colors.RESET}"
+            step_display_width = calculate_display_width(step_text)
+            padding = max(0, BOX_WIDTH - 1 - step_display_width)
+            print(f"\n{Colors.DIM}╭{'─' * BOX_WIDTH}╮{Colors.RESET}")
+            print(f"{Colors.DIM}│{Colors.RESET} {step_text}{' ' * padding}{Colors.DIM}│{Colors.RESET}")
+            print(f"{Colors.DIM}╰{'─' * BOX_WIDTH}╯{Colors.RESET}")
+
+        case StreamEventType.THINKING_DELTA:
+            if not _thinking_started:
+                print(f"\n{Colors.BOLD}{Colors.MAGENTA}🧠 Thinking:{Colors.RESET}")
+                _thinking_started = True
+            sys.stdout.write(f"{Colors.DIM}{event.content}{Colors.RESET}")
+            sys.stdout.flush()
+
+        case StreamEventType.TEXT_DELTA:
+            if not _text_started:
+                # End thinking line if it was active
+                if _thinking_started:
+                    print()  # newline after thinking
+                print(f"\n{Colors.BOLD}{Colors.BRIGHT_BLUE}🤖 Assistant:{Colors.RESET}")
+                _text_started = True
+            sys.stdout.write(event.content)
+            sys.stdout.flush()
+
+        case StreamEventType.TOOL_CALL_START:
+            # End any active text/thinking
+            if _text_started or _thinking_started:
+                print()
+                _text_started = False
+                _thinking_started = False
+
+            print(f"\n{Colors.BRIGHT_YELLOW}🔧 Tool Call:{Colors.RESET} {Colors.BOLD}{Colors.CYAN}{event.tool_name}{Colors.RESET}")
+            if event.tool_arguments:
+                import json
+
+                print(f"{Colors.DIM}   Arguments:{Colors.RESET}")
+                # Truncate long values
+                truncated = {}
+                for k, v in event.tool_arguments.items():
+                    vs = str(v)
+                    truncated[k] = vs[:200] + "..." if len(vs) > 200 else v
+                for line in json.dumps(truncated, indent=2, ensure_ascii=False).split("\n"):
+                    print(f"   {Colors.DIM}{line}{Colors.RESET}")
+
+        case StreamEventType.TOOL_CALL_RESULT:
+            if event.tool_result:
+                if event.tool_result.success:
+                    result_text = event.tool_result.content
+                    if len(result_text) > 300:
+                        result_text = result_text[:300] + f"{Colors.DIM}...{Colors.RESET}"
+                    print(f"{Colors.BRIGHT_GREEN}✓ Result:{Colors.RESET} {result_text}")
+                else:
+                    print(f"{Colors.BRIGHT_RED}✗ Error:{Colors.RESET} {Colors.RED}{event.tool_result.error}{Colors.RESET}")
+
+        case StreamEventType.STEP_COMPLETE:
+            # End any active text
+            if _text_started or _thinking_started:
+                print()
+            step_elapsed = perf_counter() - _step_start_time
+            total_elapsed = perf_counter() - _run_start_time
+            print(f"\n{Colors.DIM}⏱️  Step {event.step} completed in {step_elapsed:.2f}s (total: {total_elapsed:.2f}s){Colors.RESET}")
+
+        case StreamEventType.DONE:
+            pass  # Final text was already streamed via TEXT_DELTA
+
+        case StreamEventType.ERROR:
+            print(f"\n{Colors.BRIGHT_RED}❌ Error:{Colors.RESET} {event.content}")
+
+        case StreamEventType.CANCELLED:
+            print(f"\n{Colors.BRIGHT_YELLOW}⚠️  Task cancelled by user.{Colors.RESET}")
+
+
 async def run_agent(workspace_dir: Path, task: str = None):
     """Run Agent in interactive or non-interactive mode.
 
@@ -619,7 +713,8 @@ async def run_agent(workspace_dir: Path, task: str = None):
         print(f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} {Colors.DIM}Executing task...{Colors.RESET}\n")
         agent.add_user_message(task)
         try:
-            await agent.run()
+            async for event in agent.run_stream():
+                _render_stream_event(event)
         except Exception as e:
             print(f"\n{Colors.RED}❌ Error: {e}{Colors.RESET}")
         finally:
@@ -807,7 +902,11 @@ async def run_agent(workspace_dir: Path, task: str = None):
 
             # Run agent with periodic cancellation check
             try:
-                agent_task = asyncio.create_task(agent.run())
+                async def _run_with_stream():
+                    async for event in agent.run_stream(cancel_event):
+                        _render_stream_event(event)
+
+                agent_task = asyncio.create_task(_run_with_stream())
 
                 # Poll for cancellation while agent runs
                 while not agent_task.done():

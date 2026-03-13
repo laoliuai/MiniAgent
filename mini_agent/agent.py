@@ -335,6 +335,7 @@ Requirements:
             text, thinking = "", ""
             tool_calls = []
             pending_tools: dict[str, dict] = {}
+            finish_reason = "stop"
             tool_list = list(self.tools.values())
             self.logger.log_request(messages=self.messages, tools=tool_list)
 
@@ -367,6 +368,8 @@ Requirements:
                         case LLMStreamChunkType.USAGE:
                             if chunk.usage:
                                 self.api_total_tokens = chunk.usage.total_tokens
+                        case LLMStreamChunkType.DONE:
+                            finish_reason = chunk.finish_reason or "stop"
             except Exception as e:
                 from .retry import RetryExhaustedError
                 if isinstance(e, RetryExhaustedError):
@@ -382,7 +385,7 @@ Requirements:
                                     tool_calls=tool_calls or None)
             self.messages.append(assistant_msg)
             self.logger.log_response(content=text, thinking=thinking or None,
-                                      tool_calls=tool_calls or None, finish_reason="stop")
+                                      tool_calls=tool_calls or None, finish_reason=finish_reason)
 
             # No tool calls -> task complete
             if not tool_calls:

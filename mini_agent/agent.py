@@ -37,6 +37,9 @@ class Agent:
         max_steps: int = 50,
         workspace_dir: str = "./workspace",
         token_limit: int = 80000,  # Summary triggered when tokens exceed this value
+        log_file_level: str = "standard",
+        log_console_level: str = "minimal",
+        log_max_files: int = 50,
     ):
         self.llm = llm_client
         self.tools = {tool.name: tool for tool in tools}
@@ -60,7 +63,12 @@ class Agent:
         self.messages: list[Message] = [Message(role="system", content=system_prompt)]
 
         # Initialize logger
-        self.logger = AgentLogger()
+        from .config import LogLevel
+        self.logger = AgentLogger(
+            file_level=LogLevel(log_file_level),
+            console_level=LogLevel(log_console_level),
+            max_files=log_max_files,
+        )
 
         # Token usage from last API response (updated after each LLM call)
         self.api_total_tokens: int = 0
@@ -384,8 +392,12 @@ Requirements:
                                     thinking=thinking or None,
                                     tool_calls=tool_calls or None)
             self.messages.append(assistant_msg)
+            usage_data = None
+            if hasattr(self, 'api_total_tokens') and self.api_total_tokens:
+                usage_data = {"total_tokens": self.api_total_tokens}
             self.logger.log_response(content=text, thinking=thinking or None,
-                                      tool_calls=tool_calls or None, finish_reason=finish_reason)
+                                      tool_calls=tool_calls or None, finish_reason=finish_reason,
+                                      usage=usage_data)
 
             # No tool calls -> task complete
             if not tool_calls:

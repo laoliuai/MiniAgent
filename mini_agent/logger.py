@@ -1,66 +1,72 @@
-"""Agent run logger"""
+"""Agent run logger with configurable levels."""
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .config import LogLevel
 from .schema import Message, ToolCall
 
 
 class AgentLogger:
-    """Agent run logger
+    """Agent run logger with configurable file and console log levels.
 
-    Responsible for recording the complete interaction process of each agent run, including:
-    - LLM requests and responses
-    - Tool calls and results
+    Log levels:
+    - MINIMAL: tool names + success/fail + finish_reason only
+    - STANDARD: full messages, responses, tool results (default)
+    - VERBOSE: additionally includes tool schemas, token usage, system prompt
     """
 
-    def __init__(self):
-        """Initialize logger
+    def __init__(
+        self,
+        file_level: LogLevel = LogLevel.STANDARD,
+        console_level: LogLevel = LogLevel.MINIMAL,
+        max_files: int = 50,
+    ):
+        self.file_level = file_level
+        self.console_level = console_level
 
-        Logs are stored in ~/.mini-agent/log/ directory
-        """
-        # Use ~/.mini-agent/log/ directory for logs
+        # Numeric ordering for level comparison (string comparison is alphabetical, not severity)
+        self._LEVEL_ORDER = {LogLevel.MINIMAL: 0, LogLevel.STANDARD: 1, LogLevel.VERBOSE: 2}
+        self.max_files = max_files
+
         self.log_dir = Path.home() / ".mini-agent" / "log"
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.log_file = None
         self.log_index = 0
 
+        self._console_logger = logging.getLogger("mini_agent.trace")
+
     def start_new_run(self):
-        """Start new run, create new log file"""
+        """Start new run, create new log file."""
+        self._rotate_logs()
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_filename = f"agent_run_{timestamp}.log"
         self.log_file = self.log_dir / log_filename
         self.log_index = 0
 
-        # Write log header
         with open(self.log_file, "w", encoding="utf-8") as f:
             f.write("=" * 80 + "\n")
             f.write(f"Agent Run Log - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Log Level: file={self.file_level.value}, console={self.console_level.value}\n")
             f.write("=" * 80 + "\n\n")
 
     def log_request(self, messages: list[Message], tools: list[Any] | None = None):
-        """Log LLM request
-
-        Args:
-            messages: Message list
-            tools: Tool list (optional)
-        """
+        """Log LLM request."""
         self.log_index += 1
 
-        # Build complete request data structure
-        request_data = {
-            "messages": [],
-            "tools": [],
-        }
+        # MINIMAL: skip request details entirely
+        if self.file_level == LogLevel.MINIMAL:
+            return
 
-        # Convert messages to JSON serializable format
+        # STANDARD: log messages + tool names
+        request_data: dict[str, Any] = {"messages": []}
+
         for msg in messages:
-            msg_dict = {
-                "role": msg.role,
-                "content": msg.content,
-            }
+            msg_dict: dict[str, Any] = {"role": msg.role, "content": msg.content}
             if msg.thinking:
                 msg_dict["thinking"] = msg.thinking
             if msg.tool_calls:
@@ -69,18 +75,23 @@ class AgentLogger:
                 msg_dict["tool_call_id"] = msg.tool_call_id
             if msg.name:
                 msg_dict["name"] = msg.name
-
             request_data["messages"].append(msg_dict)
 
-        # Only record tool names
+        # Tool schemas: names only for STANDARD, full schemas for VERBOSE
         if tools:
-            request_data["tools"] = [tool.name for tool in tools]
+            if self.file_level == LogLevel.VERBOSE:
+                request_data["tools"] = [tool.to_schema() for tool in tools]
+            else:
+                request_data["tools"] = [tool.name for tool in tools]
 
-        # Format as JSON
         content = "LLM Request:\n\n"
         content += json.dumps(request_data, indent=2, ensure_ascii=False)
 
         self._write_log("REQUEST", content)
+
+        # Console output
+        if self._LEVEL_ORDER[self.console_level] >= self._LEVEL_ORDER[LogLevel.STANDARD]:
+            self._write_console("REQUEST", f"Sending {len(messages)} messages")
 
     def log_response(
         self,
@@ -88,32 +99,34 @@ class AgentLogger:
         thinking: str | None = None,
         tool_calls: list[ToolCall] | None = None,
         finish_reason: str | None = None,
+        usage: dict | None = None,
     ):
-        """Log LLM response
-
-        Args:
-            content: Response content
-            thinking: Thinking content (optional)
-            tool_calls: Tool call list (optional)
-            finish_reason: Finish reason (optional)
-        """
+        """Log LLM response."""
         self.log_index += 1
 
-        # Build complete response data structure
-        response_data = {
-            "content": content,
-        }
+        if self.file_level == LogLevel.MINIMAL:
+            # Minimal: only log finish_reason and tool call names
+            minimal_data: dict[str, Any] = {}
+            if finish_reason:
+                minimal_data["finish_reason"] = finish_reason
+            if tool_calls:
+                minimal_data["tool_calls"] = [tc.function.name for tc in tool_calls]
+            self._write_log("RESPONSE", json.dumps(minimal_data, indent=2, ensure_ascii=False))
+            return
 
+        # STANDARD+: full response
+        response_data: dict[str, Any] = {"content": content}
         if thinking:
             response_data["thinking"] = thinking
-
         if tool_calls:
             response_data["tool_calls"] = [tc.model_dump() for tc in tool_calls]
-
         if finish_reason:
             response_data["finish_reason"] = finish_reason
 
-        # Format as JSON
+        # VERBOSE: add usage breakdown
+        if self.file_level == LogLevel.VERBOSE and usage:
+            response_data["usage"] = usage
+
         log_content = "LLM Response:\n\n"
         log_content += json.dumps(response_data, indent=2, ensure_ascii=False)
 
@@ -127,42 +140,48 @@ class AgentLogger:
         result_content: str | None = None,
         result_error: str | None = None,
     ):
-        """Log tool execution result
-
-        Args:
-            tool_name: Tool name
-            arguments: Tool arguments
-            result_success: Whether successful
-            result_content: Result content (on success)
-            result_error: Error message (on failure)
-        """
+        """Log tool execution result."""
         self.log_index += 1
 
-        # Build complete tool execution result data structure
-        tool_result_data = {
+        if self.file_level == LogLevel.MINIMAL:
+            # Minimal: tool name + success/fail only
+            status = "SUCCESS" if result_success else "FAIL"
+            self._write_log("TOOL_RESULT", f"{tool_name}: {status}")
+            return
+
+        # STANDARD+: full tool result
+        tool_result_data: dict[str, Any] = {
             "tool_name": tool_name,
             "arguments": arguments,
             "success": result_success,
         }
-
         if result_success:
             tool_result_data["result"] = result_content
         else:
             tool_result_data["error"] = result_error
 
-        # Format as JSON
         content = "Tool Execution:\n\n"
         content += json.dumps(tool_result_data, indent=2, ensure_ascii=False)
 
         self._write_log("TOOL_RESULT", content)
 
-    def _write_log(self, log_type: str, content: str):
-        """Write log entry
+        # Console output for tool results
+        if self._LEVEL_ORDER[self.console_level] >= self._LEVEL_ORDER[LogLevel.STANDARD]:
+            status = "OK" if result_success else "FAIL"
+            self._write_console("TOOL", f"{tool_name}: {status}")
 
-        Args:
-            log_type: Log type (REQUEST, RESPONSE, TOOL_RESULT)
-            content: Log content
-        """
+    def _rotate_logs(self):
+        """Keep only the most recent max_files log files."""
+        log_files = sorted(
+            self.log_dir.glob("agent_run_*.log"),
+            key=lambda f: f.stat().st_mtime,
+        )
+        if len(log_files) > self.max_files:
+            for f in log_files[: -self.max_files]:
+                f.unlink(missing_ok=True)
+
+    def _write_log(self, log_type: str, content: str):
+        """Write log entry to file."""
         if self.log_file is None:
             return
 
@@ -173,6 +192,10 @@ class AgentLogger:
             f.write("-" * 80 + "\n")
             f.write(content + "\n")
 
+    def _write_console(self, log_type: str, content: str):
+        """Write log entry to console via Python logging."""
+        self._console_logger.info("[%s] %s", log_type, content)
+
     def get_log_file_path(self) -> Path:
-        """Get current log file path"""
+        """Get current log file path."""
         return self.log_file

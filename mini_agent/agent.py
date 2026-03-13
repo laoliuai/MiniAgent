@@ -2,44 +2,28 @@
 
 import asyncio
 import json
+import logging
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from time import perf_counter
 from typing import Optional
 
 import tiktoken
 
 from .llm import LLMClient
 from .logger import AgentLogger
-from .schema import Message
-from .tools.base import Tool, ToolResult
-from .utils import calculate_display_width
+from .schema import (
+    FunctionCall,
+    LLMStreamChunk,
+    LLMStreamChunkType,
+    Message,
+    StreamEvent,
+    StreamEventType,
+    ToolCall,
+    ToolResult,
+)
+from .tools.base import Tool
 
-
-# ANSI color codes
-class Colors:
-    """Terminal color definitions"""
-
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-
-    # Foreground colors
-    RED = "\033[31m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    MAGENTA = "\033[35m"
-    CYAN = "\033[36m"
-
-    # Bright colors
-    BRIGHT_BLACK = "\033[90m"
-    BRIGHT_RED = "\033[91m"
-    BRIGHT_GREEN = "\033[92m"
-    BRIGHT_YELLOW = "\033[93m"
-    BRIGHT_BLUE = "\033[94m"
-    BRIGHT_MAGENTA = "\033[95m"
-    BRIGHT_CYAN = "\033[96m"
-    BRIGHT_WHITE = "\033[97m"
+logger = logging.getLogger(__name__)
 
 
 class Agent:
@@ -118,7 +102,7 @@ class Agent:
         removed_count = len(self.messages) - last_assistant_idx
         if removed_count > 0:
             self.messages = self.messages[:last_assistant_idx]
-            print(f"{Colors.DIM}   Cleaned up {removed_count} incomplete message(s){Colors.RESET}")
+            logger.info(f"Cleaned up {removed_count} incomplete message(s)")
 
     def _estimate_tokens(self) -> int:
         """Accurately calculate token count for message history using tiktoken
@@ -204,17 +188,17 @@ class Agent:
         if not should_summarize:
             return
 
-        print(
-            f"\n{Colors.BRIGHT_YELLOW}📊 Token usage - Local estimate: {estimated_tokens}, API reported: {self.api_total_tokens}, Limit: {self.token_limit}{Colors.RESET}"
+        logger.info(
+            f"Token usage - Local estimate: {estimated_tokens}, API reported: {self.api_total_tokens}, Limit: {self.token_limit}"
         )
-        print(f"{Colors.BRIGHT_YELLOW}🔄 Triggering message history summarization...{Colors.RESET}")
+        logger.info("Triggering message history summarization...")
 
         # Find all user message indices (skip system prompt)
         user_indices = [i for i, msg in enumerate(self.messages) if msg.role == "user" and i > 0]
 
         # Need at least 1 user message to perform summary
         if len(user_indices) < 1:
-            print(f"{Colors.BRIGHT_YELLOW}⚠️  Insufficient messages, cannot summarize{Colors.RESET}")
+            logger.warning("Insufficient messages, cannot summarize")
             return
 
         # Build new message list
@@ -255,9 +239,9 @@ class Agent:
         self._skip_next_token_check = True
 
         new_tokens = self._estimate_tokens()
-        print(f"{Colors.BRIGHT_GREEN}✓ Summary completed, local tokens: {estimated_tokens} → {new_tokens}{Colors.RESET}")
-        print(f"{Colors.DIM}  Structure: system + {len(user_indices)} user messages + {summary_count} summaries{Colors.RESET}")
-        print(f"{Colors.DIM}  Note: API token count will update on next LLM call{Colors.RESET}")
+        logger.info(f"Summary completed, local tokens: {estimated_tokens} -> {new_tokens}")
+        logger.info(f"Structure: system + {len(user_indices)} user messages + {summary_count} summaries")
+        logger.info("Note: API token count will update on next LLM call")
 
     async def _create_summary(self, messages: list[Message], round_num: int) -> str:
         """Create summary for one execution round
@@ -280,10 +264,10 @@ class Agent:
                 summary_content += f"Assistant: {content_text}\n"
                 if msg.tool_calls:
                     tool_names = [tc.function.name for tc in msg.tool_calls]
-                    summary_content += f"  → Called tools: {', '.join(tool_names)}\n"
+                    summary_content += f"  -> Called tools: {', '.join(tool_names)}\n"
             elif msg.role == "tool":
                 result_preview = msg.content if isinstance(msg.content, str) else str(msg.content)
-                summary_content += f"  ← Tool returned: {result_preview}...\n"
+                summary_content += f"  <- Tool returned: {result_preview}...\n"
 
         # Call LLM to generate concise summary
         try:
@@ -310,16 +294,163 @@ Requirements:
             )
 
             summary_text = response.content
-            print(f"{Colors.BRIGHT_GREEN}✓ Summary for round {round_num} generated successfully{Colors.RESET}")
+            logger.info(f"Summary for round {round_num} generated successfully")
             return summary_text
 
         except Exception as e:
-            print(f"{Colors.BRIGHT_RED}✗ Summary generation failed for round {round_num}: {e}{Colors.RESET}")
+            logger.error(f"Summary generation failed for round {round_num}: {e}")
             # Use simple text summary on failure
             return summary_content
 
+    async def run_stream(self, cancel_event: Optional[asyncio.Event] = None) -> AsyncGenerator[StreamEvent, None]:
+        """Execute agent loop as an async generator, yielding StreamEvent objects.
+
+        This is the core agent loop. All output is delivered via events —
+        no print statements, no direct terminal output.
+
+        Args:
+            cancel_event: Optional asyncio.Event that can be set to cancel execution.
+                          When set, the agent will stop at the next safe checkpoint.
+
+        Yields:
+            StreamEvent objects representing each phase of the agent loop.
+        """
+        if cancel_event is not None:
+            self.cancel_event = cancel_event
+        self.logger.start_new_run()
+
+        for step in range(self.max_steps):
+            # Cancellation check
+            if self._check_cancelled():
+                self._cleanup_incomplete_messages()
+                yield StreamEvent(type=StreamEventType.CANCELLED)
+                return
+
+            yield StreamEvent(type=StreamEventType.STEP_START, step=step + 1)
+
+            # Token management
+            await self._summarize_messages()
+
+            # Stream LLM response
+            text, thinking = "", ""
+            tool_calls = []
+            pending_tools: dict[str, dict] = {}
+            tool_list = list(self.tools.values())
+            self.logger.log_request(messages=self.messages, tools=tool_list)
+
+            try:
+                async for chunk in self.llm.generate_stream(self.messages, tool_list):
+                    match chunk.type:
+                        case LLMStreamChunkType.TEXT_DELTA:
+                            text += chunk.content
+                            yield StreamEvent(type=StreamEventType.TEXT_DELTA,
+                                              content=chunk.content, step=step + 1)
+                        case LLMStreamChunkType.THINKING_DELTA:
+                            thinking += chunk.content
+                            yield StreamEvent(type=StreamEventType.THINKING_DELTA,
+                                              content=chunk.content, step=step + 1)
+                        case LLMStreamChunkType.TOOL_CALL_START:
+                            pending_tools[chunk.tool_call_id] = {
+                                "id": chunk.tool_call_id,
+                                "name": chunk.tool_name,
+                                "arguments_json": ""
+                            }
+                        case LLMStreamChunkType.TOOL_CALL_DELTA:
+                            pending_tools[chunk.tool_call_id]["arguments_json"] += chunk.tool_arguments
+                        case LLMStreamChunkType.TOOL_CALL_END:
+                            info = pending_tools[chunk.tool_call_id]
+                            tc = ToolCall(id=info["id"], type="function",
+                                          function=FunctionCall(
+                                              name=info["name"],
+                                              arguments=json.loads(info["arguments_json"])))
+                            tool_calls.append(tc)
+                        case LLMStreamChunkType.USAGE:
+                            if chunk.usage:
+                                self.api_total_tokens = chunk.usage.total_tokens
+            except Exception as e:
+                from .retry import RetryExhaustedError
+                if isinstance(e, RetryExhaustedError):
+                    msg = f"LLM call failed after {e.attempts} retries. Last error: {e.last_exception}"
+                else:
+                    msg = str(e)
+                yield StreamEvent(type=StreamEventType.ERROR, content=msg)
+                return
+
+            # Append complete assistant message to history
+            assistant_msg = Message(role="assistant", content=text,
+                                    thinking=thinking or None,
+                                    tool_calls=tool_calls or None)
+            self.messages.append(assistant_msg)
+            self.logger.log_response(content=text, thinking=thinking or None,
+                                      tool_calls=tool_calls or None, finish_reason="stop")
+
+            # No tool calls -> task complete
+            if not tool_calls:
+                yield StreamEvent(type=StreamEventType.STEP_COMPLETE, step=step + 1)
+                yield StreamEvent(type=StreamEventType.DONE, content=text)
+                return
+
+            # Cancellation check before tool execution
+            if self._check_cancelled():
+                self._cleanup_incomplete_messages()
+                yield StreamEvent(type=StreamEventType.CANCELLED)
+                return
+
+            # Execute tool calls
+            for tool_call in tool_calls:
+                yield StreamEvent(type=StreamEventType.TOOL_CALL_START,
+                                  tool_name=tool_call.function.name,
+                                  tool_call_id=tool_call.id,
+                                  tool_arguments=tool_call.function.arguments,
+                                  step=step + 1)
+
+                if tool_call.function.name not in self.tools:
+                    result = ToolResult(success=False, content="",
+                                        error=f"Unknown tool: {tool_call.function.name}")
+                else:
+                    try:
+                        tool = self.tools[tool_call.function.name]
+                        result = await tool.execute(**tool_call.function.arguments)
+                    except Exception as e:
+                        import traceback
+                        result = ToolResult(success=False, content="",
+                                            error=f"Tool execution failed: {e}\n{traceback.format_exc()}")
+
+                self.logger.log_tool_result(tool_name=tool_call.function.name,
+                                             arguments=tool_call.function.arguments,
+                                             result_success=result.success,
+                                             result_content=result.content if result.success else None,
+                                             result_error=result.error if not result.success else None)
+
+                yield StreamEvent(type=StreamEventType.TOOL_CALL_RESULT,
+                                  tool_name=tool_call.function.name,
+                                  tool_call_id=tool_call.id,
+                                  tool_result=result,
+                                  step=step + 1)
+
+                self.messages.append(Message(
+                    role="tool",
+                    content=result.content if result.success else f"Error: {result.error}",
+                    tool_call_id=tool_call.id,
+                    name=tool_call.function.name))
+
+                # Cancellation check after each tool
+                if self._check_cancelled():
+                    self._cleanup_incomplete_messages()
+                    yield StreamEvent(type=StreamEventType.CANCELLED)
+                    return
+
+            yield StreamEvent(type=StreamEventType.STEP_COMPLETE, step=step + 1)
+
+        # Max steps exceeded
+        yield StreamEvent(type=StreamEventType.ERROR,
+                          content=f"Task couldn't be completed after {self.max_steps} steps.")
+
     async def run(self, cancel_event: Optional[asyncio.Event] = None) -> str:
         """Execute agent loop until task is complete or max steps reached.
+
+        This is a convenience wrapper around run_stream() that collects events
+        and returns the final text result.
 
         Args:
             cancel_event: Optional asyncio.Event that can be set to cancel execution.
@@ -329,194 +460,15 @@ Requirements:
         Returns:
             The final response content, or error message (including cancellation message).
         """
-        # Set cancellation event (can also be set via self.cancel_event before calling run())
-        if cancel_event is not None:
-            self.cancel_event = cancel_event
-
-        # Start new run, initialize log file
-        self.logger.start_new_run()
-        print(f"{Colors.DIM}📝 Log file: {self.logger.get_log_file_path()}{Colors.RESET}")
-
-        step = 0
-        run_start_time = perf_counter()
-
-        while step < self.max_steps:
-            # Check for cancellation at start of each step
-            if self._check_cancelled():
-                self._cleanup_incomplete_messages()
-                cancel_msg = "Task cancelled by user."
-                print(f"\n{Colors.BRIGHT_YELLOW}⚠️  {cancel_msg}{Colors.RESET}")
-                return cancel_msg
-
-            step_start_time = perf_counter()
-            # Check and summarize message history to prevent context overflow
-            await self._summarize_messages()
-
-            # Step header with proper width calculation
-            BOX_WIDTH = 58
-            step_text = f"{Colors.BOLD}{Colors.BRIGHT_CYAN}💭 Step {step + 1}/{self.max_steps}{Colors.RESET}"
-            step_display_width = calculate_display_width(step_text)
-            padding = max(0, BOX_WIDTH - 1 - step_display_width)  # -1 for leading space
-
-            print(f"\n{Colors.DIM}╭{'─' * BOX_WIDTH}╮{Colors.RESET}")
-            print(f"{Colors.DIM}│{Colors.RESET} {step_text}{' ' * padding}{Colors.DIM}│{Colors.RESET}")
-            print(f"{Colors.DIM}╰{'─' * BOX_WIDTH}╯{Colors.RESET}")
-
-            # Get tool list for LLM call
-            tool_list = list(self.tools.values())
-
-            # Log LLM request and call LLM with Tool objects directly
-            self.logger.log_request(messages=self.messages, tools=tool_list)
-
-            try:
-                response = await self.llm.generate(messages=self.messages, tools=tool_list)
-            except Exception as e:
-                # Check if it's a retry exhausted error
-                from .retry import RetryExhaustedError
-
-                if isinstance(e, RetryExhaustedError):
-                    error_msg = f"LLM call failed after {e.attempts} retries\nLast error: {str(e.last_exception)}"
-                    print(f"\n{Colors.BRIGHT_RED}❌ Retry failed:{Colors.RESET} {error_msg}")
-                else:
-                    error_msg = f"LLM call failed: {str(e)}"
-                    print(f"\n{Colors.BRIGHT_RED}❌ Error:{Colors.RESET} {error_msg}")
-                return error_msg
-
-            # Accumulate API reported token usage
-            if response.usage:
-                self.api_total_tokens = response.usage.total_tokens
-
-            # Log LLM response
-            self.logger.log_response(
-                content=response.content,
-                thinking=response.thinking,
-                tool_calls=response.tool_calls,
-                finish_reason=response.finish_reason,
-            )
-
-            # Add assistant message
-            assistant_msg = Message(
-                role="assistant",
-                content=response.content,
-                thinking=response.thinking,
-                tool_calls=response.tool_calls,
-            )
-            self.messages.append(assistant_msg)
-
-            # Print thinking if present
-            if response.thinking:
-                print(f"\n{Colors.BOLD}{Colors.MAGENTA}🧠 Thinking:{Colors.RESET}")
-                print(f"{Colors.DIM}{response.thinking}{Colors.RESET}")
-
-            # Print assistant response
-            if response.content:
-                print(f"\n{Colors.BOLD}{Colors.BRIGHT_BLUE}🤖 Assistant:{Colors.RESET}")
-                print(f"{response.content}")
-
-            # Check if task is complete (no tool calls)
-            if not response.tool_calls:
-                step_elapsed = perf_counter() - step_start_time
-                total_elapsed = perf_counter() - run_start_time
-                print(f"\n{Colors.DIM}⏱️  Step {step + 1} completed in {step_elapsed:.2f}s (total: {total_elapsed:.2f}s){Colors.RESET}")
-                return response.content
-
-            # Check for cancellation before executing tools
-            if self._check_cancelled():
-                self._cleanup_incomplete_messages()
-                cancel_msg = "Task cancelled by user."
-                print(f"\n{Colors.BRIGHT_YELLOW}⚠️  {cancel_msg}{Colors.RESET}")
-                return cancel_msg
-
-            # Execute tool calls
-            for tool_call in response.tool_calls:
-                tool_call_id = tool_call.id
-                function_name = tool_call.function.name
-                arguments = tool_call.function.arguments
-
-                # Tool call header
-                print(f"\n{Colors.BRIGHT_YELLOW}🔧 Tool Call:{Colors.RESET} {Colors.BOLD}{Colors.CYAN}{function_name}{Colors.RESET}")
-
-                # Arguments (formatted display)
-                print(f"{Colors.DIM}   Arguments:{Colors.RESET}")
-                # Truncate each argument value to avoid overly long output
-                truncated_args = {}
-                for key, value in arguments.items():
-                    value_str = str(value)
-                    if len(value_str) > 200:
-                        truncated_args[key] = value_str[:200] + "..."
-                    else:
-                        truncated_args[key] = value
-                args_json = json.dumps(truncated_args, indent=2, ensure_ascii=False)
-                for line in args_json.split("\n"):
-                    print(f"   {Colors.DIM}{line}{Colors.RESET}")
-
-                # Execute tool
-                if function_name not in self.tools:
-                    result = ToolResult(
-                        success=False,
-                        content="",
-                        error=f"Unknown tool: {function_name}",
-                    )
-                else:
-                    try:
-                        tool = self.tools[function_name]
-                        result = await tool.execute(**arguments)
-                    except Exception as e:
-                        # Catch all exceptions during tool execution, convert to failed ToolResult
-                        import traceback
-
-                        error_detail = f"{type(e).__name__}: {str(e)}"
-                        error_trace = traceback.format_exc()
-                        result = ToolResult(
-                            success=False,
-                            content="",
-                            error=f"Tool execution failed: {error_detail}\n\nTraceback:\n{error_trace}",
-                        )
-
-                # Log tool execution result
-                self.logger.log_tool_result(
-                    tool_name=function_name,
-                    arguments=arguments,
-                    result_success=result.success,
-                    result_content=result.content if result.success else None,
-                    result_error=result.error if not result.success else None,
-                )
-
-                # Print result
-                if result.success:
-                    result_text = result.content
-                    if len(result_text) > 300:
-                        result_text = result_text[:300] + f"{Colors.DIM}...{Colors.RESET}"
-                    print(f"{Colors.BRIGHT_GREEN}✓ Result:{Colors.RESET} {result_text}")
-                else:
-                    print(f"{Colors.BRIGHT_RED}✗ Error:{Colors.RESET} {Colors.RED}{result.error}{Colors.RESET}")
-
-                # Add tool result message
-                tool_msg = Message(
-                    role="tool",
-                    content=result.content if result.success else f"Error: {result.error}",
-                    tool_call_id=tool_call_id,
-                    name=function_name,
-                )
-                self.messages.append(tool_msg)
-
-                # Check for cancellation after each tool execution
-                if self._check_cancelled():
-                    self._cleanup_incomplete_messages()
-                    cancel_msg = "Task cancelled by user."
-                    print(f"\n{Colors.BRIGHT_YELLOW}⚠️  {cancel_msg}{Colors.RESET}")
-                    return cancel_msg
-
-            step_elapsed = perf_counter() - step_start_time
-            total_elapsed = perf_counter() - run_start_time
-            print(f"\n{Colors.DIM}⏱️  Step {step + 1} completed in {step_elapsed:.2f}s (total: {total_elapsed:.2f}s){Colors.RESET}")
-
-            step += 1
-
-        # Max steps reached
-        error_msg = f"Task couldn't be completed after {self.max_steps} steps."
-        print(f"\n{Colors.BRIGHT_YELLOW}⚠️  {error_msg}{Colors.RESET}")
-        return error_msg
+        final_text = ""
+        async for event in self.run_stream(cancel_event):
+            if event.type == StreamEventType.DONE:
+                final_text = event.content or ""
+            elif event.type == StreamEventType.ERROR:
+                return event.content or "Unknown error"
+            elif event.type == StreamEventType.CANCELLED:
+                return "Task cancelled by user."
+        return final_text
 
     def get_history(self) -> list[Message]:
         """Get message history."""

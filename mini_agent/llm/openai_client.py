@@ -2,12 +2,13 @@
 
 import json
 import logging
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from openai import AsyncOpenAI
 
 from ..retry import RetryConfig, async_retry
-from ..schema import FunctionCall, LLMResponse, Message, TokenUsage, ToolCall
+from ..schema import LLMStreamChunk, LLMStreamChunkType, Message, TokenUsage
 from .base import LLMClientBase
 
 logger = logging.getLogger(__name__)
@@ -17,9 +18,10 @@ class OpenAIClient(LLMClientBase):
     """LLM client using OpenAI's protocol.
 
     This client uses the official OpenAI SDK and supports:
+    - Streaming responses via generate_stream()
     - Reasoning content (via reasoning_split=True)
     - Tool calling
-    - Retry logic
+    - Retry logic (connection phase only)
     """
 
     def __init__(
@@ -44,38 +46,6 @@ class OpenAIClient(LLMClientBase):
             api_key=api_key,
             base_url=api_base,
         )
-
-    async def _make_api_request(
-        self,
-        api_messages: list[dict[str, Any]],
-        tools: list[Any] | None = None,
-    ) -> Any:
-        """Execute API request (core method that can be retried).
-
-        Args:
-            api_messages: List of messages in OpenAI format
-            tools: Optional list of tools
-
-        Returns:
-            OpenAI ChatCompletion response (full response including usage)
-
-        Raises:
-            Exception: API call failed
-        """
-        params = {
-            "model": self.model,
-            "messages": api_messages,
-            # Enable reasoning_split to separate thinking content
-            "extra_body": {"reasoning_split": True},
-        }
-
-        if tools:
-            params["tools"] = self._convert_tools(tools)
-
-        # Use OpenAI SDK's chat.completions.create
-        response = await self.client.chat.completions.create(**params)
-        # Return full response to access usage info
-        return response
 
     def _convert_tools(self, tools: list[Any]) -> list[dict[str, Any]]:
         """Convert tools to OpenAI format.
@@ -200,96 +170,143 @@ class OpenAIClient(LLMClientBase):
             "tools": tools,
         }
 
-    def _parse_response(self, response: Any) -> LLMResponse:
-        """Parse OpenAI response into LLMResponse.
+    async def _make_stream_request(self, params: dict[str, Any]) -> Any:
+        """Create a streaming request via the OpenAI SDK.
+
+        Calls self.client.chat.completions.create(**params, stream=True)
+        and returns the async iterator.
 
         Args:
-            response: OpenAI ChatCompletion response (full response object)
+            params: Request parameters for the OpenAI chat completions API
 
         Returns:
-            LLMResponse object
+            Async iterator of stream chunks
         """
-        # Get message from response
-        message = response.choices[0].message
+        return await self.client.chat.completions.create(**params, stream=True)
 
-        # Extract text content
-        text_content = message.content or ""
+    async def _make_stream_request_with_retry(self, params: dict[str, Any]) -> Any:
+        """Wrap _make_stream_request with retry logic (connection phase only).
 
-        # Extract thinking content from reasoning_details
-        thinking_content = ""
-        if hasattr(message, "reasoning_details") and message.reasoning_details:
-            # reasoning_details is a list of reasoning blocks
-            for detail in message.reasoning_details:
-                if hasattr(detail, "text"):
-                    thinking_content += detail.text
+        Args:
+            params: Request parameters for the OpenAI chat completions API
 
-        # Extract tool calls
-        tool_calls = []
-        if message.tool_calls:
-            for tool_call in message.tool_calls:
-                # Parse arguments from JSON string
-                arguments = json.loads(tool_call.function.arguments)
-
-                tool_calls.append(
-                    ToolCall(
-                        id=tool_call.id,
-                        type="function",
-                        function=FunctionCall(
-                            name=tool_call.function.name,
-                            arguments=arguments,
-                        ),
-                    )
-                )
-
-        # Extract token usage from response
-        usage = None
-        if hasattr(response, "usage") and response.usage:
-            usage = TokenUsage(
-                prompt_tokens=response.usage.prompt_tokens or 0,
-                completion_tokens=response.usage.completion_tokens or 0,
-                total_tokens=response.usage.total_tokens or 0,
+        Returns:
+            Async iterator of stream chunks
+        """
+        if self.retry_config.enabled:
+            retry_decorator = async_retry(
+                config=self.retry_config, on_retry=self.retry_callback
             )
+            retryable_request = retry_decorator(self._make_stream_request)
+            return await retryable_request(params)
+        else:
+            return await self._make_stream_request(params)
 
-        return LLMResponse(
-            content=text_content,
-            thinking=thinking_content if thinking_content else None,
-            tool_calls=tool_calls if tool_calls else None,
-            finish_reason="stop",  # OpenAI doesn't provide finish_reason in the message
-            usage=usage,
-        )
-
-    async def generate(
+    async def generate_stream(
         self,
         messages: list[Message],
         tools: list[Any] | None = None,
-    ) -> LLMResponse:
-        """Generate response from OpenAI LLM.
+    ) -> AsyncGenerator[LLMStreamChunk, None]:
+        """Stream response chunks from OpenAI LLM.
+
+        Yields LLMStreamChunk objects as events arrive from the OpenAI SDK
+        streaming API. Handles text, thinking (reasoning_content), and tool calls.
 
         Args:
             messages: List of conversation messages
             tools: Optional list of available tools
 
-        Returns:
-            LLMResponse containing the generated content
+        Yields:
+            LLMStreamChunk for each meaningful event in the stream
         """
-        # Prepare request
-        request_params = self._prepare_request(messages, tools)
+        # Build API params
+        _, api_messages = self._convert_messages(messages)
+        params: dict[str, Any] = {
+            "model": self.model,
+            "messages": api_messages,
+            "extra_body": {"reasoning_split": True},
+        }
+        if tools:
+            params["tools"] = self._convert_tools(tools)
 
-        # Make API request with retry logic
-        if self.retry_config.enabled:
-            # Apply retry logic
-            retry_decorator = async_retry(config=self.retry_config, on_retry=self.retry_callback)
-            api_call = retry_decorator(self._make_api_request)
-            response = await api_call(
-                request_params["api_messages"],
-                request_params["tools"],
-            )
-        else:
-            # Don't use retry
-            response = await self._make_api_request(
-                request_params["api_messages"],
-                request_params["tools"],
-            )
+        # Get stream (with retry on connection)
+        stream = await self._make_stream_request_with_retry(params)
 
-        # Parse and return response
-        return self._parse_response(response)
+        # Track tool calls by index position
+        current_tool_calls: dict[int, dict] = {}
+
+        async for openai_chunk in stream:
+            # Skip chunks with no choices
+            if not openai_chunk.choices:
+                continue
+
+            choice = openai_chunk.choices[0]
+            delta = choice.delta
+
+            # Check for thinking content (reasoning_content)
+            reasoning_content = getattr(delta, "reasoning_content", None)
+            if reasoning_content:
+                yield LLMStreamChunk(
+                    type=LLMStreamChunkType.THINKING_DELTA,
+                    content=reasoning_content,
+                )
+
+            # Check for text content
+            if delta.content:
+                yield LLMStreamChunk(
+                    type=LLMStreamChunkType.TEXT_DELTA,
+                    content=delta.content,
+                )
+
+            # Check for tool call deltas
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+
+                    # First appearance of this tool call (has id and name)
+                    if tc.id:
+                        current_tool_calls[idx] = {
+                            "id": tc.id,
+                            "name": tc.function.name,
+                            "arguments": "",
+                        }
+                        yield LLMStreamChunk(
+                            type=LLMStreamChunkType.TOOL_CALL_START,
+                            tool_call_id=tc.id,
+                            tool_name=tc.function.name,
+                        )
+
+                    # Accumulate arguments
+                    if tc.function and tc.function.arguments:
+                        current_tool_calls[idx]["arguments"] += tc.function.arguments
+                        yield LLMStreamChunk(
+                            type=LLMStreamChunkType.TOOL_CALL_DELTA,
+                            tool_call_id=current_tool_calls[idx]["id"],
+                            tool_arguments=tc.function.arguments,
+                        )
+
+            # Check for finish reason
+            if choice.finish_reason:
+                # Emit TOOL_CALL_END for each tracked tool call
+                for tool_info in current_tool_calls.values():
+                    yield LLMStreamChunk(
+                        type=LLMStreamChunkType.TOOL_CALL_END,
+                        tool_call_id=tool_info["id"],
+                        tool_name=tool_info["name"],
+                    )
+
+                # Check for usage info
+                if openai_chunk.usage:
+                    yield LLMStreamChunk(
+                        type=LLMStreamChunkType.USAGE,
+                        usage=TokenUsage(
+                            prompt_tokens=openai_chunk.usage.prompt_tokens or 0,
+                            completion_tokens=openai_chunk.usage.completion_tokens or 0,
+                            total_tokens=openai_chunk.usage.total_tokens or 0,
+                        ),
+                    )
+
+                yield LLMStreamChunk(
+                    type=LLMStreamChunkType.DONE,
+                    finish_reason=choice.finish_reason,
+                )

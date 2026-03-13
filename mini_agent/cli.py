@@ -35,9 +35,11 @@ from mini_agent.schema import LLMProvider, StreamEventType
 from mini_agent.tools.base import Tool
 from mini_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from mini_agent.tools.file_tools import EditTool, ReadTool, WriteTool
+from mini_agent.tools.grep_tool import GrepTool
 from mini_agent.tools.mcp_loader import cleanup_mcp_connections, load_mcp_tools_async, set_mcp_timeout_config
 from mini_agent.tools.note_tool import SessionNoteTool
 from mini_agent.tools.skill_tool import create_skill_tools
+from mini_agent.tools.todo_tool import TodoTool
 from mini_agent.utils import calculate_display_width
 
 
@@ -462,10 +464,20 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path):
         )
         print(f"{Colors.GREEN}✅ Loaded file operation tools (workspace: {workspace_dir}){Colors.RESET}")
 
+    # Grep tool - needs workspace to resolve relative search paths
+    if config.tools.enable_grep:
+        tools.append(GrepTool(workspace_dir=str(workspace_dir)))
+        print(f"{Colors.GREEN}✅ Loaded Grep tool{Colors.RESET}")
+
     # Session note tool - needs workspace to store memory file
     if config.tools.enable_note:
         tools.append(SessionNoteTool(memory_file=str(workspace_dir / ".agent_memory.json")))
         print(f"{Colors.GREEN}✅ Loaded session note tool{Colors.RESET}")
+
+    # Todo tool - session-scoped task tracking
+    if config.tools.enable_todo:
+        tools.append(TodoTool())
+        print(f"{Colors.GREEN}✅ Loaded Todo tool{Colors.RESET}")
 
 
 async def _quiet_cleanup():
@@ -701,6 +713,9 @@ async def run_agent(workspace_dir: Path, task: str = None):
         tools=tools,
         max_steps=config.agent.max_steps,
         workspace_dir=str(workspace_dir),
+        log_file_level=config.logging.file_level.value,
+        log_console_level=config.logging.console_level.value,
+        log_max_files=config.logging.max_files,
     )
 
     # 8. Display welcome information

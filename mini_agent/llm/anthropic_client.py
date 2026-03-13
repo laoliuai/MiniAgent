@@ -1,12 +1,13 @@
 """Anthropic LLM client implementation."""
 
 import logging
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import anthropic
 
 from ..retry import RetryConfig, async_retry
-from ..schema import FunctionCall, LLMResponse, Message, TokenUsage, ToolCall
+from ..schema import LLMStreamChunk, LLMStreamChunkType, Message, TokenUsage
 from .base import LLMClientBase
 
 logger = logging.getLogger(__name__)
@@ -16,9 +17,10 @@ class AnthropicClient(LLMClientBase):
     """LLM client using Anthropic's protocol.
 
     This client uses the official Anthropic SDK and supports:
+    - Streaming responses via generate_stream()
     - Extended thinking content
     - Tool calling
-    - Retry logic
+    - Retry logic (connection phase only)
     """
 
     def __init__(
@@ -44,41 +46,6 @@ class AnthropicClient(LLMClientBase):
             api_key=api_key,
             default_headers={"Authorization": f"Bearer {api_key}"},
         )
-
-    async def _make_api_request(
-        self,
-        system_message: str | None,
-        api_messages: list[dict[str, Any]],
-        tools: list[Any] | None = None,
-    ) -> anthropic.types.Message:
-        """Execute API request (core method that can be retried).
-
-        Args:
-            system_message: Optional system message
-            api_messages: List of messages in Anthropic format
-            tools: Optional list of tools
-
-        Returns:
-            Anthropic Message response
-
-        Raises:
-            Exception: API call failed
-        """
-        params = {
-            "model": self.model,
-            "max_tokens": 16384,
-            "messages": api_messages,
-        }
-
-        if system_message:
-            params["system"] = system_message
-
-        if tools:
-            params["tools"] = self._convert_tools(tools)
-
-        # Use Anthropic SDK's async messages.create
-        response = await self.client.messages.create(**params)
-        return response
 
     def _convert_tools(self, tools: list[Any]) -> list[dict[str, Any]]:
         """Convert tools to Anthropic format.
@@ -199,95 +166,135 @@ class AnthropicClient(LLMClientBase):
             "tools": tools,
         }
 
-    def _parse_response(self, response: anthropic.types.Message) -> LLMResponse:
-        """Parse Anthropic response into LLMResponse.
+    async def _make_stream_request(self, params: dict[str, Any]) -> Any:
+        """Create a streaming request via the Anthropic SDK.
+
+        This is a thin wrapper that calls self.client.messages.stream(**params)
+        and returns the stream context manager.
 
         Args:
-            response: Anthropic Message response
+            params: Request parameters for the Anthropic messages API
 
         Returns:
-            LLMResponse object
+            Async context manager for the stream
         """
-        # Extract text content, thinking, and tool calls
-        text_content = ""
-        thinking_content = ""
-        tool_calls = []
+        return self.client.messages.stream(**params)
 
-        for block in response.content:
-            if block.type == "text":
-                text_content += block.text
-            elif block.type == "thinking":
-                thinking_content += block.thinking
-            elif block.type == "tool_use":
-                # Parse Anthropic tool_use block
-                tool_calls.append(
-                    ToolCall(
-                        id=block.id,
-                        type="function",
-                        function=FunctionCall(
-                            name=block.name,
-                            arguments=block.input,
-                        ),
-                    )
-                )
+    async def _make_stream_request_with_retry(self, params: dict[str, Any]) -> Any:
+        """Wrap _make_stream_request with retry logic (connection phase only).
 
-        # Extract token usage from response
-        # Anthropic usage includes: input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens
-        usage = None
-        if hasattr(response, "usage") and response.usage:
-            input_tokens = response.usage.input_tokens or 0
-            output_tokens = response.usage.output_tokens or 0
-            cache_read_tokens = getattr(response.usage, "cache_read_input_tokens", 0) or 0
-            cache_creation_tokens = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
-            total_input_tokens = input_tokens + cache_read_tokens + cache_creation_tokens
-            usage = TokenUsage(
-                prompt_tokens=total_input_tokens,
-                completion_tokens=output_tokens,
-                total_tokens=total_input_tokens + output_tokens,
+        Args:
+            params: Request parameters for the Anthropic messages API
+
+        Returns:
+            Async context manager for the stream
+        """
+        if self.retry_config.enabled:
+            retry_decorator = async_retry(
+                config=self.retry_config, on_retry=self.retry_callback
             )
+            retryable_request = retry_decorator(self._make_stream_request)
+            return await retryable_request(params)
+        else:
+            return await self._make_stream_request(params)
 
-        return LLMResponse(
-            content=text_content,
-            thinking=thinking_content if thinking_content else None,
-            tool_calls=tool_calls if tool_calls else None,
-            finish_reason=response.stop_reason or "stop",
-            usage=usage,
-        )
-
-    async def generate(
+    async def generate_stream(
         self,
         messages: list[Message],
         tools: list[Any] | None = None,
-    ) -> LLMResponse:
-        """Generate response from Anthropic LLM.
+    ) -> AsyncGenerator[LLMStreamChunk, None]:
+        """Stream response chunks from Anthropic LLM.
+
+        Yields LLMStreamChunk objects as events arrive from the Anthropic SDK
+        streaming API. Handles text, thinking, and tool_use content blocks.
 
         Args:
             messages: List of conversation messages
             tools: Optional list of available tools
 
-        Returns:
-            LLMResponse containing the generated content
+        Yields:
+            LLMStreamChunk for each meaningful event in the stream
         """
-        # Prepare request
-        request_params = self._prepare_request(messages, tools)
+        # Build API params
+        system_message, api_messages = self._convert_messages(messages)
+        params: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": 16384,
+            "messages": api_messages,
+        }
+        if system_message:
+            params["system"] = system_message
+        if tools:
+            params["tools"] = self._convert_tools(tools)
 
-        # Make API request with retry logic
-        if self.retry_config.enabled:
-            # Apply retry logic
-            retry_decorator = async_retry(config=self.retry_config, on_retry=self.retry_callback)
-            api_call = retry_decorator(self._make_api_request)
-            response = await api_call(
-                request_params["system_message"],
-                request_params["api_messages"],
-                request_params["tools"],
-            )
-        else:
-            # Don't use retry
-            response = await self._make_api_request(
-                request_params["system_message"],
-                request_params["api_messages"],
-                request_params["tools"],
-            )
+        # Get stream context manager (with retry on connection)
+        stream_cm = await self._make_stream_request_with_retry(params)
 
-        # Parse and return response
-        return self._parse_response(response)
+        content_blocks: dict[int, dict] = {}
+        input_tokens = 0
+
+        async with stream_cm:
+            async for event in stream_cm:
+                if event.type == "message_start":
+                    if hasattr(event, "message") and hasattr(event.message, "usage"):
+                        input_tokens = getattr(event.message.usage, "input_tokens", 0) or 0
+
+                elif event.type == "content_block_start":
+                    idx = event.index
+                    block_type = event.content_block.type
+                    content_blocks[idx] = {"type": block_type}
+
+                    if block_type == "tool_use":
+                        content_blocks[idx]["id"] = event.content_block.id
+                        content_blocks[idx]["name"] = event.content_block.name
+                        yield LLMStreamChunk(
+                            type=LLMStreamChunkType.TOOL_CALL_START,
+                            tool_call_id=event.content_block.id,
+                            tool_name=event.content_block.name,
+                        )
+
+                elif event.type == "content_block_delta":
+                    delta_type = event.delta.type
+
+                    if delta_type == "text_delta":
+                        yield LLMStreamChunk(
+                            type=LLMStreamChunkType.TEXT_DELTA,
+                            content=event.delta.text,
+                        )
+                    elif delta_type == "thinking_delta":
+                        yield LLMStreamChunk(
+                            type=LLMStreamChunkType.THINKING_DELTA,
+                            content=event.delta.thinking,
+                        )
+                    elif delta_type == "input_json_delta":
+                        block_info = content_blocks.get(event.index, {})
+                        yield LLMStreamChunk(
+                            type=LLMStreamChunkType.TOOL_CALL_DELTA,
+                            tool_call_id=block_info.get("id"),
+                            tool_arguments=event.delta.partial_json,
+                        )
+
+                elif event.type == "content_block_stop":
+                    block_info = content_blocks.get(event.index, {})
+                    if block_info.get("type") == "tool_use":
+                        yield LLMStreamChunk(
+                            type=LLMStreamChunkType.TOOL_CALL_END,
+                            tool_call_id=block_info.get("id"),
+                            tool_name=block_info.get("name"),
+                        )
+
+                elif event.type == "message_delta":
+                    output_tokens = getattr(event.usage, "output_tokens", 0) or 0
+                    total = input_tokens + output_tokens
+                    yield LLMStreamChunk(
+                        type=LLMStreamChunkType.USAGE,
+                        usage=TokenUsage(
+                            prompt_tokens=input_tokens,
+                            completion_tokens=output_tokens,
+                            total_tokens=total,
+                        ),
+                    )
+                    yield LLMStreamChunk(
+                        type=LLMStreamChunkType.DONE,
+                        finish_reason=event.delta.stop_reason or "stop",
+                    )

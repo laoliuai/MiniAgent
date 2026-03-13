@@ -186,6 +186,62 @@ async def test_write_tool_returns_stats():
         assert "bytes" in result.content
 
 
+@pytest.mark.asyncio
+async def test_edit_tool_replace_all():
+    """Test EditTool with replace_all=True."""
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as f:
+        f.write("foo bar foo baz foo")
+        temp_path = f.name
+
+    try:
+        tool = EditTool()
+        result = await tool.execute(path=temp_path, old_str="foo", new_str="qux", replace_all=True)
+
+        assert result.success
+        content = Path(temp_path).read_text()
+        assert content == "qux bar qux baz qux"
+        assert "3 occurrence" in result.content
+    finally:
+        Path(temp_path).unlink()
+
+
+@pytest.mark.asyncio
+async def test_edit_tool_multi_match_error():
+    """Test EditTool rejects multiple matches without replace_all."""
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as f:
+        f.write("foo bar foo baz foo")
+        temp_path = f.name
+
+    try:
+        tool = EditTool()
+        result = await tool.execute(path=temp_path, old_str="foo", new_str="qux")
+
+        assert not result.success
+        assert "3 matches" in result.error
+        # File should be unchanged
+        content = Path(temp_path).read_text()
+        assert content == "foo bar foo baz foo"
+    finally:
+        Path(temp_path).unlink()
+
+
+@pytest.mark.asyncio
+async def test_edit_tool_returns_line_number():
+    """Test EditTool returns line number in success message."""
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as f:
+        f.write("line1\nline2\ntarget_text\nline4\n")
+        temp_path = f.name
+
+    try:
+        tool = EditTool()
+        result = await tool.execute(path=temp_path, old_str="target_text", new_str="replaced")
+
+        assert result.success
+        assert "line 3" in result.content
+    finally:
+        Path(temp_path).unlink()
+
+
 async def main():
     """Run all tool tests."""
     print("=" * 80)
@@ -200,6 +256,9 @@ async def main():
     await test_write_tool()
     await test_write_tool_returns_stats()
     await test_edit_tool()
+    await test_edit_tool_replace_all()
+    await test_edit_tool_multi_match_error()
+    await test_edit_tool_returns_line_number()
     await test_bash_tool()
 
     print("\n" + "=" * 80)

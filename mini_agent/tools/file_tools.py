@@ -278,37 +278,57 @@ class EditTool(Tool):
                     "type": "string",
                     "description": "Replacement string (use for refactoring, renaming, etc.)",
                 },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace all occurrences (default: false, requires unique match)",
+                    "default": False,
+                },
             },
             "required": ["path", "old_str", "new_str"],
         }
 
-    async def execute(self, path: str, old_str: str, new_str: str) -> ToolResult:
+    async def execute(self, path: str, old_str: str, new_str: str, replace_all: bool = False) -> ToolResult:
         """Execute edit file."""
         try:
             file_path = Path(path)
-            # Resolve relative paths relative to workspace_dir
             if not file_path.is_absolute():
                 file_path = self.workspace_dir / file_path
 
             if not file_path.exists():
-                return ToolResult(
-                    success=False,
-                    content="",
-                    error=f"File not found: {path}",
-                )
+                return ToolResult(success=False, content="", error=f"File not found: {path}")
 
             content = file_path.read_text(encoding="utf-8")
 
-            if old_str not in content:
+            # Count matches
+            count = content.count(old_str)
+
+            if count == 0:
+                return ToolResult(success=False, content="", error=f"Text not found in file: {old_str}")
+
+            if count > 1 and not replace_all:
                 return ToolResult(
-                    success=False,
-                    content="",
-                    error=f"Text not found in file: {old_str}",
+                    success=False, content="",
+                    error=f"Found {count} matches. Provide more context for a unique match, or set replace_all=true.",
                 )
 
-            new_content = content.replace(old_str, new_str)
+            # Calculate line number of first match (before replacement)
+            match_offset = content.index(old_str)
+            match_line = content[:match_offset].count('\n') + 1
+
+            # Perform replacement
+            if replace_all:
+                new_content = content.replace(old_str, new_str)
+            else:
+                new_content = content.replace(old_str, new_str, 1)
+
             file_path.write_text(new_content, encoding="utf-8")
 
-            return ToolResult(success=True, content=f"Successfully edited {file_path}")
+            # Return with line info
+            if replace_all:
+                msg = f"Edited {file_path}: replaced {count} occurrence(s) (first at line {match_line})"
+            else:
+                msg = f"Edited {file_path}: replaced at line {match_line}"
+
+            return ToolResult(success=True, content=msg)
         except Exception as e:
             return ToolResult(success=False, content="", error=str(e))

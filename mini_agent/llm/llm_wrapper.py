@@ -6,8 +6,10 @@ This module provides a unified interface for different LLM providers
 
 import logging
 
+from collections.abc import AsyncGenerator
+
 from ..retry import RetryConfig
-from ..schema import LLMProvider, LLMResponse, Message
+from ..schema import LLMProvider, LLMResponse, LLMStreamChunk, Message
 from .anthropic_client import AnthropicClient
 from .base import LLMClientBase
 from .openai_client import OpenAIClient
@@ -125,3 +127,12 @@ class LLMClient:
             LLMResponse containing the generated content
         """
         return await self._client.generate(messages, tools)
+
+    async def generate_stream(
+        self,
+        messages: list[Message],
+        tools: list | None = None,
+    ) -> AsyncGenerator[LLMStreamChunk, None]:
+        """Stream response from LLM."""
+        async for chunk in self._client.generate_stream(messages, tools):
+            yield chunk

@@ -2,15 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel
-
-
-class ToolResult(BaseModel):
-    """Tool execution result."""
-
-    success: bool
-    content: str = ""
-    error: str | None = None
+from ..schema import ToolResult
 
 
 class Tool:

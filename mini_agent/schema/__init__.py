@@ -4,16 +4,26 @@ from .schema import (
     FunctionCall,
     LLMProvider,
     LLMResponse,
+    LLMStreamChunk,
+    LLMStreamChunkType,
     Message,
+    StreamEvent,
+    StreamEventType,
     TokenUsage,
     ToolCall,
+    ToolResult,
 )
 
 __all__ = [
     "FunctionCall",
     "LLMProvider",
     "LLMResponse",
+    "LLMStreamChunk",
+    "LLMStreamChunkType",
     "Message",
+    "StreamEvent",
+    "StreamEventType",
     "TokenUsage",
     "ToolCall",
+    "ToolResult",
 ]

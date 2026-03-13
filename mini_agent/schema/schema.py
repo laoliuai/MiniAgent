@@ -53,3 +53,63 @@ class LLMResponse(BaseModel):
     tool_calls: list[ToolCall] | None = None
     finish_reason: str
     usage: TokenUsage | None = None  # Token usage from API response
+
+
+class ToolResult(BaseModel):
+    """Tool execution result."""
+
+    success: bool
+    content: str = ""
+    error: str | None = None
+
+
+class LLMStreamChunkType(str, Enum):
+    """Types of chunks in an LLM stream."""
+
+    TEXT_DELTA = "text_delta"
+    THINKING_DELTA = "thinking_delta"
+    TOOL_CALL_START = "tool_call_start"
+    TOOL_CALL_DELTA = "tool_call_delta"
+    TOOL_CALL_END = "tool_call_end"
+    USAGE = "usage"
+    DONE = "done"
+
+
+class LLMStreamChunk(BaseModel):
+    """A single chunk from an LLM streaming response (protocol-level)."""
+
+    type: LLMStreamChunkType
+    content: str | None = None
+    tool_call_id: str | None = None
+    tool_name: str | None = None
+    tool_arguments: str | None = None
+    usage: TokenUsage | None = None
+    finish_reason: str | None = None
+
+
+class StreamEventType(str, Enum):
+    """Types of events in an Agent stream."""
+
+    TEXT_DELTA = "text_delta"
+    THINKING_DELTA = "thinking_delta"
+    STEP_START = "step_start"
+    TOOL_CALL_START = "tool_call_start"
+    TOOL_CALL_RESULT = "tool_call_result"
+    STEP_COMPLETE = "step_complete"
+    DONE = "done"
+    ERROR = "error"
+    CANCELLED = "cancelled"
+
+
+class StreamEvent(BaseModel):
+    """A single event from Agent.run_stream() (business-level)."""
+
+    type: StreamEventType
+    content: str | None = None
+    step: int | None = None
+    tool_name: str | None = None
+    tool_call_id: str | None = None
+    tool_arguments: dict | None = None
+    tool_result: ToolResult | None = None
+    usage: TokenUsage | None = None
+    finish_reason: str | None = None

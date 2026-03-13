@@ -31,18 +31,21 @@ When a file exceeds `MAX_LINES` (2000) and the caller did **not** specify `offse
 
 ```python
 MAX_LINES = 2000
+PREVIEW_LINES = 100  # enough for LLM to get structure context
 
 lines = f.readlines()
 total_lines = len(lines)
 
 if total_lines > MAX_LINES and offset is None and limit is None:
-    # Return first 50 lines + file info + hint
-    selected_lines = lines[:50]
+    # Return first PREVIEW_LINES + file info + hint
+    selected_lines = lines[:PREVIEW_LINES]
     # ... format with line numbers ...
     header = f"[File: {path}, {total_lines} lines, {file_size} bytes]\n"
-    footer = f"\n[Showing first 50 of {total_lines} lines. Use offset/limit to read specific ranges.]"
+    footer = f"\n[Showing first {PREVIEW_LINES} of {total_lines} lines. Use offset/limit to read specific ranges.]"
     return ToolResult(success=True, content=header + content + footer)
 ```
+
+> **Note:** Preview set to 100 lines (not 50) to give the LLM enough structural context for orientation. The token truncation (32K) remains as the ultimate safety net.
 
 #### 1.2 Long Line Truncation
 Truncate individual lines exceeding `MAX_LINE_LENGTH` (2000 characters):
@@ -118,42 +121,57 @@ Everything else stays the same.
     "description": "Replace all occurrences (default: false, requires unique match)",
     "default": False,
 }
+```
 
+#### 3.2 Complete Execute Flow (replaces current `execute` method)
+
+The full flow in a single linear block — line number calculation happens **before** replacement:
+
+```python
 async def execute(self, path: str, old_str: str, new_str: str, replace_all: bool = False) -> ToolResult:
-```
+    try:
+        file_path = Path(path)
+        if not file_path.is_absolute():
+            file_path = self.workspace_dir / file_path
 
-#### 3.2 Fix Multi-Match Behavior
+        if not file_path.exists():
+            return ToolResult(success=False, content="", error=f"File not found: {path}")
 
-```python
-count = content.count(old_str)
+        content = file_path.read_text(encoding="utf-8")
 
-if count == 0:
-    return ToolResult(success=False, content="",
-                      error=f"Text not found in file: {old_str}")
+        # 1. Count matches
+        count = content.count(old_str)
 
-if count > 1 and not replace_all:
-    return ToolResult(success=False, content="",
-                      error=f"Found {count} matches for the text. Provide more context for a unique match, or set replace_all=true.")
+        if count == 0:
+            return ToolResult(success=False, content="",
+                              error=f"Text not found in file: {old_str}")
 
-if replace_all:
-    new_content = content.replace(old_str, new_str)
-else:
-    new_content = content.replace(old_str, new_str, 1)
-```
+        if count > 1 and not replace_all:
+            return ToolResult(success=False, content="",
+                              error=f"Found {count} matches. Provide more context for a unique match, or set replace_all=true.")
 
-#### 3.3 Return Line Number Information
+        # 2. Calculate line number of first match (BEFORE replacement)
+        match_offset = content.index(old_str)
+        match_line = content[:match_offset].count('\n') + 1
 
-```python
-# Calculate the line number of the first match
-match_offset = content.index(old_str)
-match_line = content[:match_offset].count('\n') + 1
+        # 3. Perform replacement
+        if replace_all:
+            new_content = content.replace(old_str, new_str)
+        else:
+            new_content = content.replace(old_str, new_str, 1)
 
-if replace_all:
-    msg = f"Edited {file_path}: replaced {count} occurrence(s) (first at line {match_line})"
-else:
-    msg = f"Edited {file_path}: replaced at line {match_line}"
+        file_path.write_text(new_content, encoding="utf-8")
 
-return ToolResult(success=True, content=msg)
+        # 4. Return with line info
+        if replace_all:
+            msg = f"Edited {file_path}: replaced {count} occurrence(s) (first at line {match_line})"
+        else:
+            msg = f"Edited {file_path}: replaced at line {match_line}"
+
+        return ToolResult(success=True, content=msg)
+
+    except Exception as e:
+        return ToolResult(success=False, content="", error=str(e))
 ```
 
 ---
@@ -179,6 +197,8 @@ stdout_text = truncate_text_by_tokens(stdout_text, BASH_MAX_OUTPUT_TOKENS)
 
 Only truncate stdout. stderr is typically short and should be preserved in full for debugging.
 
+> **Note:** Truncation happens on the raw `stdout_text` string **before** constructing `BashOutputResult`. The Pydantic `model_validator` in `BashOutputResult` auto-generates `content` from `stdout`+`stderr`, so `content` will reflect the already-truncated stdout.
+
 ---
 
 ## 5. New GrepTool
@@ -190,14 +210,65 @@ Calls system search tools (ripgrep preferred, grep fallback) via subprocess. Not
 
 ### Interface
 
+All tools in this codebase use `@property` for `name`, `description`, `parameters` — GrepTool follows the same pattern:
+
 ```python
 class GrepTool(Tool):
-    name = "grep"
-    description = (
-        "Search file contents using regex patterns. "
-        "Use this instead of bash for searching files. "
-        "Returns matching lines with file paths and line numbers."
-    )
+    """Search file contents using regex patterns."""
+
+    _search_tool_cache: str | None = None  # Class-level cache
+
+    def __init__(self, workspace_dir: str = "."):
+        self.workspace_dir = Path(workspace_dir).absolute()
+
+    @property
+    def name(self) -> str:
+        return "grep"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Search file contents using regex patterns. "
+            "Use this instead of bash for searching files. "
+            "Returns matching lines with file paths and line numbers."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Regex pattern to search for",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Directory or file to search (default: workspace root)",
+                },
+                "glob": {
+                    "type": "string",
+                    "description": "File filter pattern, e.g. '*.py', '*.json'",
+                },
+                "context": {
+                    "type": "integer",
+                    "description": "Lines of context around each match (default: 0)",
+                    "default": 0,
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of result lines to return (default: 50)",
+                    "default": 50,
+                },
+                "output_mode": {
+                    "type": "string",
+                    "enum": ["content", "files_only", "count"],
+                    "description": "Output format (default: content)",
+                    "default": "content",
+                },
+            },
+            "required": ["pattern"],
+        }
 ```
 
 ### Parameters
@@ -208,16 +279,31 @@ class GrepTool(Tool):
 | path | str | No | workspace_dir | Directory or file to search |
 | glob | str | No | None | File filter, e.g. `"*.py"` |
 | context | int | No | 0 | Lines of context around matches |
-| max_results | int | No | 50 | Maximum number of matching lines |
+| max_results | int | No | 50 | Maximum number of result lines to return |
 | output_mode | str | No | "content" | `"content"`, `"files_only"`, or `"count"` |
+
+### Path Resolution
+
+Consistent with ReadTool/WriteTool/EditTool pattern:
+
+```python
+def _resolve_path(self, path: str | None) -> Path:
+    if path is None:
+        return self.workspace_dir
+    p = Path(path)
+    if not p.is_absolute():
+        p = self.workspace_dir / p
+    return p
+```
 
 ### Execution Logic
 
 ```python
-async def execute(self, pattern, path=None, glob=None,
-                  context=0, max_results=50, output_mode="content"):
+async def execute(self, pattern: str, path: str | None = None, glob: str | None = None,
+                  context: int = 0, max_results: int = 50,
+                  output_mode: str = "content") -> ToolResult:
     search_path = self._resolve_path(path)
-    cmd = self._build_command(pattern, search_path, glob, context, max_results, output_mode)
+    cmd = self._build_command(pattern, search_path, glob, context, output_mode)
 
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -234,7 +320,13 @@ async def execute(self, pattern, path=None, glob=None,
 
     output = stdout.decode("utf-8", errors="replace")
 
-    # Truncation protection
+    # Total result limiting: take first max_results lines
+    lines = output.splitlines()
+    if len(lines) > max_results:
+        output = "\n".join(lines[:max_results])
+        output += f"\n\n[Truncated: showing {max_results} of {len(lines)} result lines]"
+
+    # Token truncation as safety net
     output = truncate_text_by_tokens(output, 16000)
 
     if not output.strip():
@@ -246,8 +338,6 @@ async def execute(self, pattern, path=None, glob=None,
 ### Search Tool Detection
 
 ```python
-_search_tool_cache: str | None = None  # Class-level cache
-
 @classmethod
 def _detect_search_tool(cls) -> str:
     if cls._search_tool_cache is not None:
@@ -268,13 +358,15 @@ def _detect_search_tool(cls) -> str:
 
 **ripgrep path:**
 ```
-rg --no-heading -n [--glob GLOB] [-C CONTEXT] [-l | -c] [--max-count MAX] PATTERN PATH
+rg --no-heading -n [--glob GLOB] [-C CONTEXT] [-l | -c] PATTERN PATH
 ```
 
 **grep fallback:**
 ```
-grep -rn [--include=GLOB] [-C CONTEXT] [-l | -c] PATTERN PATH | head -MAX
+grep -rn [--include=GLOB] [-C CONTEXT] [-l | -c] PATTERN PATH
 ```
+
+> **Note:** `rg --max-count` limits per-file, not total. Total result limiting is handled in Python after output collection (see `max_results` logic in execute). Token truncation serves as an additional backstop.
 
 ### Registration
 - `GrepTool(workspace_dir=str(workspace_dir))` in `cli.py:add_workspace_tools()`
@@ -337,89 +429,113 @@ class TodoStore:
 
 ### TodoTool Interface
 
+Follows `@property` pattern consistent with all existing tools:
+
 ```python
 class TodoTool(Tool):
-    name = "todo"
-    description = (
-        "Manage a task list to track progress on complex multi-step work. "
-        "Operations: add (create tasks), update (change status/content), "
-        "list (show all tasks), remove (delete a task). "
-        "For complex tasks (3+ steps), create a todo list first, then work through it."
-    )
-```
+    """Session-level task tracking for complex multi-step work."""
 
-### Parameters
+    def __init__(self):
+        self._store = TodoStore()
 
-```python
-{
-    "type": "object",
-    "properties": {
-        "operation": {
-            "type": "string",
-            "enum": ["add", "update", "list", "remove"],
-            "description": "Operation to perform"
-        },
-        "items": {
-            "type": "array",
-            "description": "Items for add/update operations",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "integer", "description": "Item ID (required for update/remove)"},
-                    "content": {"type": "string", "description": "Task description"},
-                    "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
-                }
-            }
-        },
-        "id": {
-            "type": "integer",
-            "description": "Item ID for remove operation"
+    @property
+    def name(self) -> str:
+        return "todo"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Manage a task list to track progress on complex multi-step work. "
+            "Operations: add (create tasks), update (change status/content), "
+            "list (show all tasks), remove (delete a task). "
+            "For complex tasks (3+ steps), create a todo list first, then work through it."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["add", "update", "list", "remove"],
+                    "description": "Operation to perform",
+                },
+                "items": {
+                    "type": "array",
+                    "description": "Items for add/update operations",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer", "description": "Item ID (required for update/remove)"},
+                            "content": {"type": "string", "description": "Task description"},
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+                        },
+                    },
+                },
+                "id": {
+                    "type": "integer",
+                    "description": "Item ID for remove operation",
+                },
+            },
+            "required": ["operation"],
         }
-    },
-    "required": ["operation"]
-}
 ```
+
+> **Note on `id` parameter:** The JSON schema uses `"id"` which maps directly to the Python kwarg. This shadows Python's built-in `id()` but is acceptable here since `id()` is never called inside `execute`. The LLM generates `{"id": 3}` in its tool call JSON, and `**kwargs` unpacking requires the parameter name to match the schema key.
 
 ### Execution
 
+Explicit `KeyError` handling for invalid IDs — returns a clean error instead of a traceback:
+
 ```python
 async def execute(self, operation: str, items: list[dict] | None = None,
-                  id: int | None = None) -> ToolResult:
-    match operation:
-        case "add":
-            if not items:
-                return ToolResult(success=False, content="", error="'items' required for add")
-            added = []
-            for item in items:
-                todo = self._store.add(item["content"], item.get("status", "pending"))
-                added.append(f"#{todo.id}")
-            return ToolResult(success=True, content=f"Added {len(added)} todo(s): {', '.join(added)}")
+                  id: int | None = None) -> ToolResult:  # noqa: A002
+    try:
+        match operation:
+            case "add":
+                if not items:
+                    return ToolResult(success=False, content="", error="'items' required for add")
+                added = []
+                for item in items:
+                    todo = self._store.add(item["content"], item.get("status", "pending"))
+                    added.append(f"#{todo.id}")
+                return ToolResult(success=True, content=f"Added {len(added)} todo(s): {', '.join(added)}")
 
-        case "update":
-            if not items:
-                return ToolResult(success=False, content="", error="'items' required for update")
-            updates = []
-            for item in items:
-                todo = self._store.update(item["id"], item.get("content"), item.get("status"))
-                updates.append(f"#{todo.id} -> {todo.status}")
-            return ToolResult(success=True, content=f"Updated: {', '.join(updates)}")
+            case "update":
+                if not items:
+                    return ToolResult(success=False, content="", error="'items' required for update")
+                updates = []
+                for item in items:
+                    todo = self._store.update(item["id"], item.get("content"), item.get("status"))
+                    updates.append(f"#{todo.id} -> {todo.status}")
+                return ToolResult(success=True, content=f"Updated: {', '.join(updates)}")
 
-        case "list":
-            todos = self._store.list_all()
-            if not todos:
-                return ToolResult(success=True, content="No todos. Use add to create tasks.")
-            lines = []
-            for t in todos:
-                status_icon = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
-                lines.append(f"  #{t.id} {status_icon.get(t.status, '[ ]')} {t.content}")
-            lines.append(f"\n{self._store.summary()}")
-            return ToolResult(success=True, content="Todo List:\n" + "\n".join(lines))
+            case "list":
+                todos = self._store.list_all()
+                if not todos:
+                    return ToolResult(success=True, content="No todos. Use add to create tasks.")
+                lines = []
+                for t in todos:
+                    status_icon = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
+                    lines.append(f"  #{t.id} {status_icon.get(t.status, '[ ]')} {t.content}")
+                lines.append(f"\n{self._store.summary()}")
+                return ToolResult(success=True, content="Todo List:\n" + "\n".join(lines))
 
-        case "remove":
-            if id is None:
-                return ToolResult(success=False, content="", error="'id' required for remove")
-            self._store.remove(id)
-            return ToolResult(success=True, content=f"Removed todo #{id}")
+            case "remove":
+                if id is None:
+                    return ToolResult(success=False, content="", error="'id' required for remove")
+                self._store.remove(id)
+                return ToolResult(success=True, content=f"Removed todo #{id}")
+
+            case _:
+                return ToolResult(success=False, content="",
+                                  error=f"Unknown operation: {operation}")
+
+    except KeyError as e:
+        return ToolResult(success=False, content="", error=f"Todo not found: {e}")
+    except Exception as e:
+        return ToolResult(success=False, content="", error=str(e))
 ```
 
 ### Registration
@@ -459,14 +575,16 @@ class LogLevel(str, Enum):
 
 ### Configuration
 
-**`config.py`** — new model:
+**`config.py`** — new model with Pydantic enum validation:
 
 ```python
 class LoggingConfig(BaseModel):
-    file_level: str = "standard"
-    console_level: str = "minimal"
+    file_level: LogLevel = LogLevel.STANDARD
+    console_level: LogLevel = LogLevel.MINIMAL
     max_files: int = 50
 ```
+
+> **Note:** Using `LogLevel` enum directly (not `str`) so Pydantic validates at config load time. Invalid values like `"debug"` will produce a clear validation error instead of a cryptic `ValueError` at Agent construction.
 
 **`Config`** — add field:
 
@@ -476,6 +594,25 @@ class Config(BaseModel):
     agent: AgentConfig
     tools: ToolsConfig
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+```
+
+**`Config.from_yaml()`** — add parsing (required because `from_yaml` does manual field extraction):
+
+```python
+# Parse logging configuration
+logging_data = data.get("logging", {})
+logging_config = LoggingConfig(
+    file_level=logging_data.get("file_level", "standard"),
+    console_level=logging_data.get("console_level", "minimal"),
+    max_files=logging_data.get("max_files", 50),
+)
+
+return cls(
+    llm=llm_config,
+    agent=agent_config,
+    tools=tools_config,
+    logging=logging_config,  # new
+)
 ```
 
 **`config-example.yaml`** — add section:
@@ -507,8 +644,27 @@ class AgentLogger:
 - `log_request()` — respect level: minimal skips, standard writes messages (current behavior), verbose adds tool schemas
 - `log_response()` — respect level: minimal writes finish_reason only, standard writes full response, verbose adds usage breakdown
 - `log_tool_result()` — respect level: minimal writes name+status, standard writes full result, verbose same as standard
-- New `_rotate_logs()` — delete oldest files when count > max_files
-- New `_write_console()` — output via Python logging module for console visibility
+
+**New `_rotate_logs()`:**
+
+```python
+def _rotate_logs(self):
+    """Keep only the most recent max_files log files, delete older ones."""
+    log_files = sorted(self.log_dir.glob("agent_run_*.log"), key=lambda f: f.stat().st_mtime)
+    if len(log_files) > self.max_files:
+        for f in log_files[:-self.max_files]:
+            f.unlink(missing_ok=True)
+```
+
+**New `_write_console()`:**
+
+```python
+def _write_console(self, log_type: str, content: str):
+    """Write log entry to console via Python logging module."""
+    self._console_logger.info("[%s] %s", log_type, content)
+```
+
+The `_write_console` method is called alongside `_write_log` in each `log_*` method when the content passes the `console_level` threshold check.
 
 ### Agent / CLI Integration
 

@@ -60,6 +60,12 @@ def truncate_text_by_tokens(
     return head_part + truncation_note + tail_part
 
 
+# ReadTool constants
+MAX_LINES = 2000
+MAX_LINE_LENGTH = 2000
+PREVIEW_LINES = 100
+
+
 class ReadTool(Tool):
     """Read file content."""
 
@@ -120,30 +126,50 @@ class ReadTool(Tool):
                     error=f"File not found: {path}",
                 )
 
+            file_size = file_path.stat().st_size
+
             # Read file content with line numbers
             with open(file_path, encoding="utf-8") as f:
                 lines = f.readlines()
 
-            # Apply offset and limit
-            start = (offset - 1) if offset else 0
-            end = (start + limit) if limit else len(lines)
-            if start < 0:
+            total_lines = len(lines)
+
+            # File metadata header
+            size_str = f"{file_size / 1024:.1f} KB" if file_size >= 1024 else f"{file_size} bytes"
+            header = f"[File: {path}, {total_lines} lines, {size_str}]"
+
+            # Large file protection: preview only when no offset/limit specified
+            if total_lines > MAX_LINES and offset is None and limit is None:
+                selected_lines = lines[:PREVIEW_LINES]
                 start = 0
-            if end > len(lines):
-                end = len(lines)
+                end = PREVIEW_LINES
+                header += f"\n[Showing first {PREVIEW_LINES} of {total_lines} lines. Use offset/limit to read specific ranges.]"
+            else:
+                # Apply offset and limit
+                start = (offset - 1) if offset else 0
+                end = (start + limit) if limit else len(lines)
+                if start < 0:
+                    start = 0
+                if end > len(lines):
+                    end = len(lines)
+                selected_lines = lines[start:end]
 
-            selected_lines = lines[start:end]
+                if offset is not None or limit is not None:
+                    header += f"\n[Showing lines {start + 1}-{end} of {total_lines}.]"
 
-            # Format with line numbers (1-indexed)
+            # Format with line numbers (1-indexed), truncate long lines
             numbered_lines = []
             for i, line in enumerate(selected_lines, start=start + 1):
                 # Remove trailing newline for formatting
                 line_content = line.rstrip("\n")
+                if len(line_content) > MAX_LINE_LENGTH:
+                    original_len = len(line_content)
+                    line_content = line_content[:MAX_LINE_LENGTH] + f"... [truncated, {original_len} chars total]"
                 numbered_lines.append(f"{i:6d}|{line_content}")
 
-            content = "\n".join(numbered_lines)
+            content = header + "\n" + "\n".join(numbered_lines)
 
-            # Apply token truncation if needed
+            # Apply token truncation as safety net
             max_tokens = 32000
             content = truncate_text_by_tokens(content, max_tokens)
 

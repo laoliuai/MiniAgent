@@ -91,6 +91,87 @@ async def test_bash_tool():
     print("✅ BashTool error handling test passed")
 
 
+@pytest.mark.asyncio
+async def test_read_tool_large_file_protection():
+    """Test that large files get preview + hint instead of full content."""
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as f:
+        # Write 2500 lines (exceeds MAX_LINES=2000)
+        for i in range(2500):
+            f.write(f"Line {i+1}: some content here\n")
+        temp_path = f.name
+
+    try:
+        tool = ReadTool()
+        result = await tool.execute(path=temp_path)
+
+        assert result.success
+        # Should show preview, not all 2500 lines
+        assert "2500 lines" in result.content
+        assert "Use offset/limit" in result.content
+        # Should contain first ~100 lines but NOT line 2500
+        assert "|Line 1:" in result.content
+        assert "|Line 2500:" not in result.content
+    finally:
+        Path(temp_path).unlink()
+
+
+@pytest.mark.asyncio
+async def test_read_tool_large_file_with_offset():
+    """Test that large files can be read with offset/limit."""
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as f:
+        for i in range(2500):
+            f.write(f"Line {i+1}: content\n")
+        temp_path = f.name
+
+    try:
+        tool = ReadTool()
+        result = await tool.execute(path=temp_path, offset=2490, limit=10)
+
+        assert result.success
+        assert "|Line 2490:" in result.content
+        assert "|Line 2499:" in result.content
+    finally:
+        Path(temp_path).unlink()
+
+
+@pytest.mark.asyncio
+async def test_read_tool_long_line_truncation():
+    """Test that long lines get truncated."""
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as f:
+        f.write("short line\n")
+        f.write("x" * 5000 + "\n")  # Very long line
+        f.write("another short line\n")
+        temp_path = f.name
+
+    try:
+        tool = ReadTool()
+        result = await tool.execute(path=temp_path)
+
+        assert result.success
+        assert "truncated" in result.content
+        assert "5000 chars" in result.content
+    finally:
+        Path(temp_path).unlink()
+
+
+@pytest.mark.asyncio
+async def test_read_tool_metadata_header():
+    """Test that output includes file metadata header."""
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as f:
+        f.write("Hello\nWorld\n")
+        temp_path = f.name
+
+    try:
+        tool = ReadTool()
+        result = await tool.execute(path=temp_path)
+
+        assert result.success
+        assert "[File:" in result.content
+        assert "2 lines" in result.content
+    finally:
+        Path(temp_path).unlink()
+
+
 async def main():
     """Run all tool tests."""
     print("=" * 80)

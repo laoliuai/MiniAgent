@@ -54,6 +54,7 @@ class MCPConfig(BaseModel):
 
 class LoggingConfig(BaseModel):
     """Logging configuration"""
+
     file_level: LogLevel = LogLevel.STANDARD
     console_level: LogLevel = LogLevel.MINIMAL
     max_files: int = 50

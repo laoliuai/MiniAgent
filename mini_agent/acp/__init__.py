@@ -36,7 +36,7 @@ from mini_agent.cli import add_workspace_tools, initialize_base_tools
 from mini_agent.config import Config
 from mini_agent.llm import LLMClient
 from mini_agent.retry import RetryConfig as RetryConfigBase
-from mini_agent.schema import Message
+from mini_agent.schema import Message, StreamEventType
 
 logger = logging.getLogger(__name__)
 
@@ -125,43 +125,43 @@ class MiniMaxACPAgent:
             state.cancelled = True
 
     async def _run_turn(self, state: SessionState, session_id: str) -> str:
-        agent = state.agent
-        for _ in range(agent.max_steps):
-            if state.cancelled:
-                return "cancelled"
-            tool_schemas = [tool.to_schema() for tool in agent.tools.values()]
-            try:
-                response = await agent.llm.generate(messages=agent.messages, tools=tool_schemas)
-            except Exception as exc:
-                logger.exception("LLM error")
-                await self._send(session_id, update_agent_message(text_block(f"Error: {exc}")))
-                return "refusal"
-            if response.thinking:
-                await self._send(session_id, update_agent_thought(text_block(response.thinking)))
-            if response.content:
-                await self._send(session_id, update_agent_message(text_block(response.content)))
-            agent.messages.append(Message(role="assistant", content=response.content, thinking=response.thinking, tool_calls=response.tool_calls))
-            if not response.tool_calls:
-                return "end_turn"
-            for call in response.tool_calls:
-                name, args = call.function.name, call.function.arguments
-                # Show tool name with key arguments for better visibility
-                args_preview = ", ".join(f"{k}={repr(v)[:50]}" for k, v in list(args.items())[:2]) if isinstance(args, dict) else ""
-                label = f"🔧 {name}({args_preview})" if args_preview else f"🔧 {name}()"
-                await self._send(session_id, start_tool_call(call.id, label, kind="execute", raw_input=args))
-                tool = agent.tools.get(name)
-                if not tool:
-                    text, status = f"[ERROR] Unknown tool: {name}", "failed"
-                else:
-                    try:
-                        result = await tool.execute(**args)
-                        status = "completed" if result.success else "failed"
-                        prefix = "[OK]" if result.success else "[ERROR]"
-                        text = f"{prefix} {result.content if result.success else result.error or 'Tool execution failed'}"
-                    except Exception as exc:
-                        status, text = "failed", f"[ERROR] Tool error: {exc}"
-                await self._send(session_id, update_tool_call(call.id, status=status, content=[tool_content(text_block(text))], raw_output=text))
-                agent.messages.append(Message(role="tool", content=text, tool_call_id=call.id, name=name))
+        """Run one turn by consuming agent.run_stream() events."""
+        cancel_event = asyncio.Event()
+        # Wire ACP cancellation to the asyncio event
+        if state.cancelled:
+            cancel_event.set()
+
+        async for event in state.agent.run_stream(cancel_event):
+            # Check ACP-level cancellation each iteration
+            if state.cancelled and not cancel_event.is_set():
+                cancel_event.set()
+
+            match event.type:
+                case StreamEventType.TEXT_DELTA:
+                    await self._send(session_id, update_agent_message(text_block(event.content)))
+                case StreamEventType.THINKING_DELTA:
+                    await self._send(session_id, update_agent_thought(text_block(event.content)))
+                case StreamEventType.TOOL_CALL_START:
+                    args = event.tool_arguments or {}
+                    args_preview = ", ".join(f"{k}={repr(v)[:50]}" for k, v in list(args.items())[:2]) if isinstance(args, dict) else ""
+                    label = f"🔧 {event.tool_name}({args_preview})" if args_preview else f"🔧 {event.tool_name}()"
+                    await self._send(session_id, start_tool_call(event.tool_call_id, label, kind="execute", raw_input=args))
+                case StreamEventType.TOOL_CALL_RESULT:
+                    if event.tool_result:
+                        status = "completed" if event.tool_result.success else "failed"
+                        prefix = "[OK]" if event.tool_result.success else "[ERROR]"
+                        text = f"{prefix} {event.tool_result.content if event.tool_result.success else event.tool_result.error or 'Tool execution failed'}"
+                    else:
+                        status, text = "failed", "[ERROR] No result"
+                    await self._send(session_id, update_tool_call(event.tool_call_id, status=status, content=[tool_content(text_block(text))], raw_output=text))
+                case StreamEventType.ERROR:
+                    await self._send(session_id, update_agent_message(text_block(f"Error: {event.content}")))
+                    return "refusal"
+                case StreamEventType.CANCELLED:
+                    return "cancelled"
+                case StreamEventType.DONE:
+                    return "end_turn"
+
         return "max_turn_requests"
 
     async def _send(self, session_id: str, update: Any) -> None:

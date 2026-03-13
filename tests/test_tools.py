@@ -179,6 +179,10 @@ async def main():
     print("=" * 80)
 
     await test_read_tool()
+    await test_read_tool_large_file_protection()
+    await test_read_tool_large_file_with_offset()
+    await test_read_tool_long_line_truncation()
+    await test_read_tool_metadata_header()
     await test_write_tool()
     await test_edit_tool()
     await test_bash_tool()

@@ -146,8 +146,8 @@ class ReadTool(Tool):
                 header += f"\n[Showing first {PREVIEW_LINES} of {total_lines} lines. Use offset/limit to read specific ranges.]"
             else:
                 # Apply offset and limit
-                start = (offset - 1) if offset else 0
-                end = (start + limit) if limit else len(lines)
+                start = (offset - 1) if offset is not None else 0
+                end = (start + limit) if limit is not None else len(lines)
                 if start < 0:
                     start = 0
                 if end > len(lines):

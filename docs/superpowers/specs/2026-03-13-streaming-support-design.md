@@ -82,7 +82,9 @@ class LLMClientBase(ABC):
         """Collect stream into complete LLMResponse. Not abstract — lives in base."""
         text, thinking = "", ""
         tool_calls = []
-        current_tool = {}
+        # Dict keyed by tool_call_id to handle multiple concurrent tool calls
+        # (OpenAI can interleave deltas for different tool calls)
+        pending_tools: dict[str, dict] = {}
         usage, finish_reason = None, "stop"
 
         async for chunk in self.generate_stream(messages, tools):
@@ -92,14 +94,20 @@ class LLMClientBase(ABC):
                 case LLMStreamChunkType.THINKING_DELTA:
                     thinking += chunk.content
                 case LLMStreamChunkType.TOOL_CALL_START:
-                    current_tool = {"id": chunk.tool_call_id, "name": chunk.tool_name, "arguments_json": ""}
+                    pending_tools[chunk.tool_call_id] = {
+                        "id": chunk.tool_call_id,
+                        "name": chunk.tool_name,
+                        "arguments_json": ""
+                    }
                 case LLMStreamChunkType.TOOL_CALL_DELTA:
-                    current_tool["arguments_json"] += chunk.tool_arguments
+                    # All TOOL_CALL_DELTA chunks carry tool_call_id for correlation
+                    pending_tools[chunk.tool_call_id]["arguments_json"] += chunk.tool_arguments
                 case LLMStreamChunkType.TOOL_CALL_END:
+                    info = pending_tools[chunk.tool_call_id]
                     tool_calls.append(ToolCall(
-                        id=current_tool["id"], type="function",
-                        function=FunctionCall(name=current_tool["name"],
-                                              arguments=json.loads(current_tool["arguments_json"]))
+                        id=info["id"], type="function",
+                        function=FunctionCall(name=info["name"],
+                                              arguments=json.loads(info["arguments_json"]))
                     ))
                 case LLMStreamChunkType.USAGE:
                     usage = chunk.usage
@@ -129,24 +137,39 @@ async def generate_stream(self, messages, tools=None):
     request_params = self._prepare_request(messages, tools)
     stream = await self._make_stream_request_with_retry(request_params)
 
+    # Track content blocks by index to know their type/id on content_block_stop
+    # Anthropic's content_block_stop only carries index, not block type or id
+    content_blocks: dict[int, dict] = {}  # index -> {"type": ..., "id": ..., "name": ...}
+
     async with stream as s:
         async for event in s:
             if event.type == "content_block_start":
-                if event.content_block.type == "tool_use":
+                idx = event.index
+                block = event.content_block
+                content_blocks[idx] = {"type": block.type}
+                if block.type == "tool_use":
+                    content_blocks[idx].update({"id": block.id, "name": block.name})
                     yield LLMStreamChunk(type=TOOL_CALL_START,
-                                         tool_call_id=event.content_block.id,
-                                         tool_name=event.content_block.name)
+                                         tool_call_id=block.id,
+                                         tool_name=block.name)
             elif event.type == "content_block_delta":
                 if event.delta.type == "text_delta":
                     yield LLMStreamChunk(type=TEXT_DELTA, content=event.delta.text)
                 elif event.delta.type == "thinking_delta":
                     yield LLMStreamChunk(type=THINKING_DELTA, content=event.delta.thinking)
                 elif event.delta.type == "input_json_delta":
+                    # Look up tool_call_id from tracked content blocks
+                    block_info = content_blocks.get(event.index, {})
                     yield LLMStreamChunk(type=TOOL_CALL_DELTA,
+                                         tool_call_id=block_info.get("id"),
                                          tool_arguments=event.delta.partial_json)
             elif event.type == "content_block_stop":
-                # Yield TOOL_CALL_END if the stopped block was a tool_use
-                yield LLMStreamChunk(type=TOOL_CALL_END, ...)
+                # Only emit TOOL_CALL_END for tool_use blocks
+                block_info = content_blocks.get(event.index, {})
+                if block_info.get("type") == "tool_use":
+                    yield LLMStreamChunk(type=TOOL_CALL_END,
+                                         tool_call_id=block_info["id"],
+                                         tool_name=block_info["name"])
             elif event.type == "message_delta":
                 yield LLMStreamChunk(type=USAGE, usage=..., finish_reason=...)
             elif event.type == "message_stop":
@@ -181,6 +204,7 @@ async def generate_stream(self, messages, tools=None):
                     if tc.function.arguments:
                         current_tool_calls[idx]["arguments"] += tc.function.arguments
                         yield LLMStreamChunk(type=TOOL_CALL_DELTA,
+                                             tool_call_id=current_tool_calls[idx]["id"],
                                              tool_arguments=tc.function.arguments)
         if chunk.choices and chunk.choices[0].finish_reason:
             # Emit TOOL_CALL_END for all accumulated tool calls
@@ -245,7 +269,8 @@ async def run_stream(self, cancel_event=None) -> AsyncGenerator[StreamEvent, Non
         # Stream LLM response
         text, thinking = "", ""
         tool_calls = []
-        current_tool_json = {}
+        # Dict keyed by tool_call_id to handle multiple concurrent tool calls
+        pending_tools: dict[str, dict] = {}
         tool_list = list(self.tools.values())
         self.logger.log_request(messages=self.messages, tools=tool_list)
 
@@ -261,23 +286,30 @@ async def run_stream(self, cancel_event=None) -> AsyncGenerator[StreamEvent, Non
                         yield StreamEvent(type=StreamEventType.THINKING_DELTA,
                                           content=chunk.content, step=step + 1)
                     case LLMStreamChunkType.TOOL_CALL_START:
-                        current_tool_json = {
+                        pending_tools[chunk.tool_call_id] = {
                             "id": chunk.tool_call_id,
                             "name": chunk.tool_name,
                             "arguments_json": ""
                         }
                     case LLMStreamChunkType.TOOL_CALL_DELTA:
-                        current_tool_json["arguments_json"] += chunk.tool_arguments
+                        pending_tools[chunk.tool_call_id]["arguments_json"] += chunk.tool_arguments
                     case LLMStreamChunkType.TOOL_CALL_END:
-                        tc = ToolCall(id=current_tool_json["id"], type="function",
+                        info = pending_tools[chunk.tool_call_id]
+                        tc = ToolCall(id=info["id"], type="function",
                                       function=FunctionCall(
-                                          name=current_tool_json["name"],
-                                          arguments=json.loads(current_tool_json["arguments_json"])))
+                                          name=info["name"],
+                                          arguments=json.loads(info["arguments_json"])))
                         tool_calls.append(tc)
                     case LLMStreamChunkType.USAGE:
                         self.api_total_tokens = chunk.usage.total_tokens
         except Exception as e:
-            yield StreamEvent(type=StreamEventType.ERROR, content=str(e))
+            # Includes RetryExhaustedError — content carries attempt count and last error
+            from .retry import RetryExhaustedError
+            if isinstance(e, RetryExhaustedError):
+                msg = f"LLM call failed after {e.attempts} retries. Last error: {e.last_exception}"
+            else:
+                msg = str(e)
+            yield StreamEvent(type=StreamEventType.ERROR, content=msg)
             return
 
         # Append complete assistant message to history
@@ -467,3 +499,32 @@ __all__ = [
 - Tool system (tool execution is not streaming)
 - Retry core code (same mechanism, different wrapping point)
 - Logger (still records complete requests/responses inside Agent)
+
+## Implementation Notes
+
+### Print logic removal from Agent
+
+All `print()` calls in `agent.py` must be removed, including those in:
+- `_summarize_messages()` — token usage feedback, summary progress
+- `_cleanup_incomplete_messages()` — cleanup status
+- The main loop — step headers, thinking/response output, tool call display, timing
+
+Summarization and cleanup feedback can be surfaced to consumers by logging only (via `AgentLogger`). These are internal bookkeeping events, not user-facing business events, so they do not need `StreamEvent` types.
+
+### Internal LLM calls
+
+`_create_summary()` calls `self.llm.generate()` (the convenience wrapper) with a separate message list. This is an internal side-channel call that does **not** emit `StreamEvent`s. It collects the stream internally and returns a complete `LLMResponse`. Implementers must not attempt to yield events from within `_summarize_messages()`.
+
+### Cross-module imports
+
+`StreamEvent.tool_result` references `ToolResult` from `tools/base.py`. To avoid circular imports between `schema/` and `tools/`, either:
+- Define `ToolResult` in `schema/schema.py` and import it from `tools/base.py` (preferred — moves the shared type to the shared module), or
+- Use `from __future__ import annotations` and a `TYPE_CHECKING` guard in `schema/schema.py`
+
+### Cancellation during LLM streaming
+
+Cancellation is checked at step boundaries and between tool calls, but **not** during `async for chunk in generate_stream()`. If the LLM response is slow (e.g., long thinking), cancellation will not take effect until the stream completes or the current iteration yields. This is an accepted limitation for the initial implementation.
+
+### Timing metrics
+
+The current Agent prints per-step timing via `perf_counter()`. After the migration, timing becomes the consumer's responsibility. Consumers can track `STEP_START` → `STEP_COMPLETE` intervals using their own timers.

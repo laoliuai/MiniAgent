@@ -255,6 +255,23 @@ async def test_multiple_background_commands():
 
 
 @pytest.mark.asyncio
+async def test_foreground_output_truncation():
+    """Test that very long stdout gets truncated."""
+    bash_tool = BashTool()
+    # Generate ~30000 words of output (~89000 tokens, well above 16000 token limit)
+    # Note: repeated single chars like 'a'*80000 only yield ~10000 tokens due to
+    # cl100k_base compression, so we use varied words to reliably exceed the limit.
+    result = await bash_tool.execute(
+        command="python3 -c \"print(' '.join(f'word{i}' for i in range(30000)))\"",
+        timeout=10,
+    )
+
+    assert result.success
+    # 30000 words >> 16000 tokens, so truncation MUST trigger
+    assert "truncated" in result.content.lower()
+
+
+@pytest.mark.asyncio
 async def test_timeout_validation():
     """Test timeout parameter validation."""
     print("\n=== Testing Timeout Validation ===")

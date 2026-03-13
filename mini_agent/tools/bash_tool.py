@@ -13,6 +13,9 @@ from typing import Any
 from pydantic import Field, model_validator
 
 from .base import Tool, ToolResult
+from .file_tools import truncate_text_by_tokens
+
+BASH_MAX_OUTPUT_TOKENS = 16000
 
 
 class BashOutputResult(ToolResult):
@@ -411,6 +414,9 @@ Examples:
                 # Decode output
                 stdout_text = stdout.decode("utf-8", errors="replace")
                 stderr_text = stderr.decode("utf-8", errors="replace")
+
+                # Truncate long stdout to prevent context overflow
+                stdout_text = truncate_text_by_tokens(stdout_text, BASH_MAX_OUTPUT_TOKENS)
 
                 # Create result (content auto-formatted by model_validator)
                 is_success = process.returncode == 0

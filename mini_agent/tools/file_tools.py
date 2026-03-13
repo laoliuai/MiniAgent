@@ -230,7 +230,10 @@ class WriteTool(Tool):
             file_path.parent.mkdir(parents=True, exist_ok=True)
 
             file_path.write_text(content, encoding="utf-8")
-            return ToolResult(success=True, content=f"Successfully wrote to {file_path}")
+
+            line_count = content.count('\n') + (1 if content and not content.endswith('\n') else 0)
+            byte_count = len(content.encode('utf-8'))
+            return ToolResult(success=True, content=f"Successfully wrote to {file_path} ({line_count} lines, {byte_count} bytes)")
         except Exception as e:
             return ToolResult(success=False, content="", error=str(e))
 

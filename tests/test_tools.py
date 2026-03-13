@@ -172,6 +172,20 @@ async def test_read_tool_metadata_header():
         Path(temp_path).unlink()
 
 
+@pytest.mark.asyncio
+async def test_write_tool_returns_stats():
+    """Test that WriteTool returns line count and byte count."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        file_path = Path(tmpdir) / "test.txt"
+
+        tool = WriteTool()
+        result = await tool.execute(path=str(file_path), content="line1\nline2\nline3")
+
+        assert result.success
+        assert "3 lines" in result.content
+        assert "bytes" in result.content
+
+
 async def main():
     """Run all tool tests."""
     print("=" * 80)
@@ -184,6 +198,7 @@ async def main():
     await test_read_tool_long_line_truncation()
     await test_read_tool_metadata_header()
     await test_write_tool()
+    await test_write_tool_returns_stats()
     await test_edit_tool()
     await test_bash_tool()
 

@@ -23,6 +23,12 @@ class Tool:
         """Tool parameters schema (JSON Schema format)."""
         raise NotImplementedError
 
+    @property
+    def compress_strategy(self) -> "ToolCompressStrategy | None":
+        """Override to provide a custom compression strategy for this tool's output.
+        See mini_agent.context.compress_strategies for available strategies."""
+        return None
+
     async def execute(self, *args, **kwargs) -> ToolResult:  # type: ignore
         """Execute the tool with arbitrary arguments."""
         raise NotImplementedError

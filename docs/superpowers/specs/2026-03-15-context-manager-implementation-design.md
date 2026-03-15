@@ -286,16 +286,37 @@ class ContextManager:
         """Initialize system block (with context editing prompt if enabled)."""
 
     def add_user_message(self, content: str):
-        """Record user message as ContextBlock. First message becomes USER_INTENT."""
+        """Record user message as ContextBlock. First message becomes USER_INTENT.
+        Sets both token_count and original_token_count."""
 
     def add_assistant_reply(self, content: str, thinking: Optional[str] = None):
-        """Record assistant reply as ContextBlock."""
+        """Record assistant reply as ContextBlock.
+        Sets both token_count and original_token_count.
+        Thinking content stored in ContextBlock.tags as 'has_thinking' marker;
+        full thinking text not retained (it's not sent back to the LLM)."""
 
     def add_tool_call(self, tool_name: str, tool_input: dict, tool_result: str):
-        """Record tool_use + tool_result as a single TOOL_CALL ContextBlock."""
+        """Record tool_use + tool_result as a single TOOL_CALL ContextBlock.
+        tool_input stored as JSON string in tool_input_summary (truncated to 200 chars).
+        BudgetAssembler json.loads() it back to dict when expanding to tool_use messages.
+        Sets both token_count and original_token_count."""
 
     async def process_and_assemble(self) -> list[Message]:
-        """Run stages 1→2→3 (async for auto compress), assemble final messages."""
+        """Run stages 1→2→3 (async for auto compress), assemble final messages.
+
+        Pseudocode:
+            self.classifier.classify(self.store.all(), self.current_turn)
+            self.micro.compress(self.store.all(), self.current_turn)
+            if self.auto.should_trigger(self.store):
+                await self.auto.compress(self.store, self.current_turn)
+            self._maybe_upgrade_mode()
+            messages, usage = self.assembler.assemble(self.store.all())
+            return messages
+        """
+
+    def _maybe_upgrade_mode(self):
+        """Auto-upgrade Claude Code → Hybrid when pressure builds.
+        Propagates new config to ALL stages: classifier, micro, auto, assembler."""
 
     def handle_context_tool(self, tool_name: str, tool_input: dict) -> str:
         """Route context_* tool calls to ContextEditor."""

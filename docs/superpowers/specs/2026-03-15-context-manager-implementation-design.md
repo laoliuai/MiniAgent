@@ -41,16 +41,40 @@ mini_agent/context/
 
 ## 3. Core Data Model (`models.py`)
 
-As defined in the original design document:
+All fields from Section 4.1 of the original design document are included:
 
 - `Layer` enum: L0_CORE, L1_WORKING, L2_REFERENCE, L3_ARCHIVE
 - `BlockType` enum: SYSTEM, USER_INTENT, USER_MESSAGE, ASSISTANT_REPLY, TOOL_CALL, SUMMARY, PINNED
 - `BlockStatus` enum: ACTIVE, MICRO_COMPRESSED, SUMMARIZED, OBSOLETE, PINNED
-- `ContextBlock` dataclass with:
-  - Dual-track content: `original_content` (preserved) / `working_content` (compressed)
-  - `compression_history: list[dict]` audit trail
-  - `depends_on: list[str]` for dependency chain promotion
-  - `tool_name`, `tool_input_summary` for tool metadata
+- `ContextBlock` dataclass — full field list:
+  - `id: str` — e.g. `"turn_015_0_execute_sql"` (turn + index + tool_name to avoid collision)
+  - `turn_id: int`
+  - `block_type: BlockType`
+  - `layer: Layer`
+  - `status: BlockStatus` (default ACTIVE)
+  - `original_content: str` — preserved, never modified after creation
+  - `working_content: str` — compressed version, what gets sent to LLM
+  - `token_count: int` — current working_content tokens
+  - `original_token_count: int`
+  - `tool_name: Optional[str]`
+  - `tool_input_summary: str` — always retained for traceability
+  - `depends_on: list[str]` — block IDs this block depends on
+  - `superseded_by: Optional[str]` — block ID that replaces this one
+  - `tags: list[str]` — free-form tags for filtering
+  - `compression_history: list[dict]` — audit trail with stage/before/after
+
+### BlockStore Interface (`block_store.py`)
+
+```python
+class BlockStore:
+    def add(self, block: ContextBlock) -> ContextBlock
+    def get(self, block_id: str) -> Optional[ContextBlock]
+    def get_blocks_by_turn(self, turn_id: int) -> list[ContextBlock]
+    def all(self) -> list[ContextBlock]
+    def active_blocks(self) -> list[ContextBlock]   # excludes OBSOLETE, SUMMARIZED
+    def total_active_tokens(self) -> int
+    def remove(self, block_id: str)
+```
 
 ---
 
@@ -93,12 +117,13 @@ Single dataclass controls all behavior. Key fields:
 |---|---|---|---|---|---|
 | `claude_code_mode` | INF | 0.85 | 0.0 | 0.0 | Short conversations (<50 turns) |
 | `hybrid_mode` (default) | 8 | 0.40 | 0.30 | 0.15 | Long conversations (50-200 turns) |
-| `full_layering_mode` | 5 | 0.30 | 0.35 | 0.20 | Research tasks with frequent lookback |
+| `full_layering_mode` | 5 (l2=15) | 0.30 | 0.35 | 0.20 | Research tasks with frequent lookback |
 
 ### Dynamic Mode Upgrade
 
 When in Claude Code mode, auto-upgrade to Hybrid when:
 - `token_usage_ratio > 0.70` AND `current_turn > 20`
+- All stage configs must be updated: classifier, micro, auto, assembler (original design missed auto)
 
 ### config.yaml Integration
 
@@ -110,7 +135,20 @@ context:
   enable_prefix_caching: true
 ```
 
-`Config` dataclass gains `context: ContextConfig` field. Old `agent.token_limit` removed.
+Existing `Config` uses Pydantic `BaseModel`. `ContextConfig` should also be a Pydantic `BaseModel` (not a plain dataclass) for consistency. The `mode` field maps to a preset factory at init time:
+
+```python
+class ContextConfig(BaseModel):
+    mode: str = "hybrid"  # "claude_code" | "hybrid" | "full_layering"
+    # ... fields with defaults from the selected preset ...
+
+    @classmethod
+    def from_mode(cls, mode: str, **overrides) -> "ContextConfig":
+        presets = {"claude_code": {...}, "hybrid": {...}, "full_layering": {...}}
+        return cls(**{**presets[mode], **overrides})
+```
+
+`Config` gains `context: ContextConfig` field. Old `Agent.__init__` `token_limit` parameter removed.
 
 ---
 
@@ -130,6 +168,22 @@ Pure rules, zero LLM cost. Assigns each block to L0/L1/L2/L3 based on age.
 ### Stage 2: MicroCompressor (`micro_compressor.py` + `compress_strategies.py`)
 
 Runs every turn, zero LLM cost. Handles 60-80% of token bloat.
+
+```python
+class MicroCompressor:
+    def __init__(self, config: ContextConfig, tool_registry: dict[str, Tool]):
+        self.config = config
+        self.tool_registry = tool_registry
+        self.strategies: dict[str, ToolCompressStrategy] = {
+            "execute_sql": SqlResultStrategy(),
+            "execute_code": CodeOutputStrategy(),
+            "read_file": FileReadStrategy(),
+            "write_file": PassThroughStrategy(),
+            "web_search": SearchResultStrategy(),
+            "list_files": PassThroughStrategy(),
+        }
+        self.default_strategy = DefaultTruncateStrategy()
+```
 
 **Strategy dispatch** (differs from original design — uses tool registry):
 
@@ -151,6 +205,7 @@ def _get_strategy(self, block: ContextBlock) -> ToolCompressStrategy:
 - `CodeOutputStrategy` — light: head+tail 40 lines; aggressive: errors + tail 5 lines
 - `FileReadStrategy` — light: 30 lines + structure; aggressive: structure summary only
 - `SearchResultStrategy` — light: title+snippet; aggressive: titles only
+- `PassThroughStrategy` — returns content unchanged (for write confirmations, directory listings)
 - `DefaultTruncateStrategy` — 60% head + 30% tail
 
 **Compression intensity** based on layer:
@@ -159,13 +214,31 @@ def _get_strategy(self, block: ContextBlock) -> ToolCompressStrategy:
 
 ### Stage 3: AutoCompressor (`auto_compressor.py`)
 
-Triggered when `total_active_tokens > trigger_ratio * budget`.
+Triggered when `total_active_tokens > trigger_ratio * budget`. **All methods are async** to match the codebase's async-first architecture.
+
+```python
+class AutoCompressor:
+    def __init__(self, config: ContextConfig, llm_client: LLMClient):
+        self.config = config
+        self.llm = llm_client
+
+    def should_trigger(self, store: BlockStore) -> bool: ...
+
+    async def compress(self, store: BlockStore, current_turn: int) -> Optional[ContextBlock]:
+        """Async — calls LLM for summary generation."""
+        ...
+
+    async def _generate_summary(self, blocks: list[ContextBlock]) -> str:
+        """Uses llm_client's async interface (non-streaming complete or collected stream)."""
+        ...
+```
 
 - Selects oldest `MICRO_COMPRESSED` blocks
-- One LLM call generates YAML structured summary
+- One async LLM call generates YAML structured summary
 - Original blocks marked `SUMMARIZED`, new `SUMMARY` block added at L2
 - Supports `auto_compress_model` for using a cheaper model
 - Target: compress down to `target_ratio * budget`
+- **Error handling**: if LLM call fails, skip compression this turn (blocks stay MICRO_COMPRESSED), retry on next trigger
 
 ### Stage 4: ContextEditor (`context_editor.py`)
 
@@ -198,7 +271,8 @@ Fills layers by priority, produces final `messages[]`:
 
 ```python
 class ContextManager:
-    def __init__(self, config: ContextConfig, llm_client, tool_registry: dict[str, Tool]):
+    def __init__(self, config: ContextConfig, llm_client: LLMClient,
+                 tool_registry: dict[str, Tool]):
         self.config = config
         self.store = BlockStore()
         self.classifier = LayerClassifier(config)
@@ -211,13 +285,19 @@ class ContextManager:
     def init_system(self, system_prompt: str):
         """Initialize system block (with context editing prompt if enabled)."""
 
-    def add_turn(self, user_msg, assistant_reply, tool_calls: list):
-        """Convert a conversation turn into ContextBlocks and add to store."""
+    def add_user_message(self, content: str):
+        """Record user message as ContextBlock. First message becomes USER_INTENT."""
 
-    def process_and_assemble(self) -> list[Message]:
-        """Run stages 1→2→3, assemble final messages. Core method."""
+    def add_assistant_reply(self, content: str, thinking: Optional[str] = None):
+        """Record assistant reply as ContextBlock."""
 
-    def handle_context_tool(self, tool_name, tool_input) -> str:
+    def add_tool_call(self, tool_name: str, tool_input: dict, tool_result: str):
+        """Record tool_use + tool_result as a single TOOL_CALL ContextBlock."""
+
+    async def process_and_assemble(self) -> list[Message]:
+        """Run stages 1→2→3 (async for auto compress), assemble final messages."""
+
+    def handle_context_tool(self, tool_name: str, tool_input: dict) -> str:
         """Route context_* tool calls to ContextEditor."""
 
     def get_system_prompt_section(self) -> str:
@@ -234,12 +314,44 @@ class ContextManager:
 
 ## 8. Agent Integration
 
+### Async streaming integration
+
+The existing `Agent.run_stream()` is an async generator that yields `StreamEvent` objects. The integration must preserve this architecture:
+
+```python
+async def run_stream(self, user_message: str):
+    self.context_manager.add_user_message(user_message)
+
+    for step in range(self.max_steps):
+        # Async: auto compress may call LLM
+        messages = await self.context_manager.process_and_assemble()
+
+        async for event in self.llm_client.generate_stream(messages, tools):
+            yield event  # Stream to caller as before
+
+        # After stream completes, record results
+        if response.tool_calls:
+            for tool_call in response.tool_calls:
+                if tool_call.name.startswith("context_"):
+                    result = self.context_manager.handle_context_tool(
+                        tool_call.name, tool_call.input)
+                    # No yield — context edits are invisible to user
+                else:
+                    result = await self._execute_tool(tool_call)
+                    self.context_manager.add_tool_call(
+                        tool_call.name, tool_call.input, result)
+        else:
+            self.context_manager.add_assistant_reply(response.content)
+            break
+```
+
 ### What changes in Agent:
 
 - **New**: `self.context_manager = ContextManager(config, llm_client, tools)`
-- **Modified**: `run_stream()` calls `context_manager.process_and_assemble()` instead of `_summarize_messages()`
+- **Modified**: `run_stream()` uses `context_manager` for message assembly (async)
 - **Modified**: tool call routing — `context_*` tools go to `context_manager.handle_context_tool()`
 - **Modified**: system prompt construction — append `context_manager.get_system_prompt_section()`
+- **Modified**: tool registration — include `context_manager.get_context_tools()` alongside business tools
 
 ### What gets deleted from Agent:
 
@@ -252,7 +364,7 @@ class ContextManager:
 
 ### What stays unchanged:
 
-- `run_stream()` async streaming architecture
+- `run_stream()` async streaming architecture (preserved, not replaced)
 - `_execute_tool()` business tool execution
 - Cancellation mechanism (`asyncio.Event`)
 - CLI entry point and interactive logic
@@ -280,7 +392,43 @@ class ContextManager:
 
 ---
 
-## 11. Performance Targets
+## 11. Token Counter (`token_counter.py`)
+
+Consolidates existing `Agent._estimate_tokens()` logic into a shared utility:
+
+```python
+def count_tokens(text: str) -> int:
+    """Multi-model token counting. tiktoken primary, char heuristic fallback."""
+```
+
+- Primary: `tiktoken.get_encoding("cl100k_base")` (works for GPT-4/Claude, reasonable approximation for others)
+- Fallback: ~4 chars/token for ASCII, ~1.5 chars/token for CJK
+- Existing tiktoken import in `agent.py` is removed; all token counting goes through this module
+
+---
+
+## 12. Additional Design Notes
+
+### Multiple tool calls per turn
+
+A single LLM response can contain multiple `tool_use` blocks. Each becomes a separate `ContextBlock` with an index suffix to avoid ID collision: `turn_015_0_execute_sql`, `turn_015_1_read_file`.
+
+### Prefix caching and message ordering
+
+The `_optimize_for_caching` reorder only affects the stable/volatile boundary. Within the volatile section, chronological order is preserved. This ensures LLMs that expect temporal ordering still work correctly.
+
+### Logging/observability
+
+Pipeline stages emit log events via the existing `AgentLogger`:
+- Block creation: `[CONTEXT] +block turn_015_0_execute_sql (TOOL_CALL, 8200 tokens)`
+- Micro compression: `[CONTEXT] micro: turn_012_0_execute_sql 8200→1500 tokens (light)`
+- Auto compression: `[CONTEXT] auto: turns 5-12 summarized, freed 12000 tokens`
+- Context edit: `[CONTEXT] edit: mark_obsolete turns [8,9], freed 3200 tokens`
+- Mode upgrade: `[CONTEXT] mode upgrade: claude_code → hybrid (turn 22, usage 72%)`
+
+---
+
+## 13. Performance Targets
 
 | Metric | Current | Target (Hybrid mode) |
 |---|---|---|

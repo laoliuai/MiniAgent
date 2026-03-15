@@ -170,6 +170,25 @@ class AgentLogger:
             status = "OK" if result_success else "FAIL"
             self._write_console("TOOL", f"{tool_name}: {status}")
 
+    def log_context_event(self, event: str, details: str = ""):
+        """Log context management events.
+
+        Visible on console at VERBOSE level, in file at STANDARD+ level.
+        """
+        self.log_index += 1
+
+        content = f"[CONTEXT] {event}"
+        if details:
+            content += f": {details}"
+
+        # File: STANDARD+
+        if self._LEVEL_ORDER[self.file_level] >= self._LEVEL_ORDER[LogLevel.STANDARD]:
+            self._write_log("CONTEXT", content)
+
+        # Console: VERBOSE only
+        if self._LEVEL_ORDER[self.console_level] >= self._LEVEL_ORDER[LogLevel.VERBOSE]:
+            self._write_console("CONTEXT", f"{event}" + (f": {details}" if details else ""))
+
     def _rotate_logs(self):
         """Keep only the most recent max_files log files."""
         log_files = sorted(

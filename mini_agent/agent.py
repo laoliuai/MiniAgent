@@ -164,7 +164,9 @@ class Agent:
             yield StreamEvent(type=StreamEventType.STEP_START, step=step + 1)
 
             # Context management: process and assemble messages
-            message_dicts = await self.context_manager.process_and_assemble()
+            message_dicts, ctx_events = await self.context_manager.process_and_assemble()
+            for event in ctx_events:
+                self.logger.log_context_event(*event.split(": ", 1))
             messages = self._dicts_to_messages(message_dicts)
             # Update self.messages for backward compatibility / logging
             self.messages = messages
@@ -249,7 +251,10 @@ class Agent:
                         tool_call.function.name,
                         tool_call.function.arguments,
                     )
-                    logger.debug("Context edit: %s -> %s", tool_call.function.name, edit_result)
+                    self.logger.log_context_event(
+                        "context_edit",
+                        f"{tool_call.function.name} → {edit_result}",
+                    )
                     continue
 
                 yield StreamEvent(type=StreamEventType.TOOL_CALL_START,

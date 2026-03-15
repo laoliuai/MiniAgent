@@ -103,36 +103,58 @@ class ContextManager:
         ))
         self._tool_call_index += 1
 
-    async def process_and_assemble(self) -> list[dict]:
-        """Run stages 1->2->3, assemble final messages as dicts.
+    async def process_and_assemble(self) -> tuple[list[dict], list[str]]:
+        """Run stages 1→2→3, assemble final messages as dicts.
 
-        Note: Returns list[dict], not list[Message]. The Agent integration layer
-        converts these dicts to Message objects before passing to LLM client.
-        This keeps ContextManager decoupled from the schema module.
+        Returns:
+            (messages, events) — messages for LLM, events for logging.
         """
+        events: list[str] = []
         all_blocks = self.store.all()
 
         # Stage 1: Classify
         self.classifier.classify(all_blocks, self.current_turn)
 
-        # Stage 2: Micro compress
+        # Stage 2: Micro compress — track what got compressed
+        tokens_before = self.store.total_active_tokens()
         self.micro.compress(all_blocks, self.current_turn)
+        tokens_after_micro = self.store.total_active_tokens()
+        micro_saved = tokens_before - tokens_after_micro
+        if micro_saved > 0:
+            compressed_count = sum(
+                1 for b in all_blocks
+                if b.status == BlockStatus.MICRO_COMPRESSED
+                and b.compression_history
+                and b.compression_history[-1].get("stage") == "micro"
+            )
+            events.append(
+                f"micro_compress: {compressed_count} blocks, saved {micro_saved} tokens"
+            )
 
         # Stage 3: Auto compress (async — may call LLM)
         if self.auto.should_trigger(self.store):
-            await self.auto.compress(self.store, self.current_turn)
+            summary = await self.auto.compress(self.store, self.current_turn)
+            if summary:
+                events.append(
+                    f"auto_compress: turns {summary.id}, "
+                    f"freed ~{tokens_after_micro - self.store.total_active_tokens()} tokens (LLM summary)"
+                )
 
         # Dynamic mode upgrade
+        old_mode = self.config.mode
         self._maybe_upgrade_mode()
+        if self.config.mode != old_mode:
+            events.append(f"mode_upgrade: {old_mode} → {self.config.mode}")
 
         # Stage 5: Assemble
         messages, usage = self.assembler.assemble(self.store.all())
-        logger.debug(
-            "Context assembled: L0=%d L1=%d L2=%d L3=%d total=%d/%d",
-            usage["L0"], usage["L1"], usage["L2"], usage["L3"],
-            sum(usage.values()), self.config.total_token_budget,
+        total_used = sum(usage.values())
+        events.append(
+            f"assembled: L0={usage['L0']} L1={usage['L1']} L2={usage['L2']} L3={usage['L3']} "
+            f"total={total_used}/{self.config.total_token_budget} "
+            f"({total_used / self.config.total_token_budget:.0%})"
         )
-        return messages
+        return messages, events
 
     def handle_context_tool(self, tool_name: str, tool_input: dict) -> str:
         """Route context_* tool calls to ContextEditor."""
@@ -170,7 +192,7 @@ class ContextManager:
         }
 
     def _maybe_upgrade_mode(self):
-        """Auto-upgrade Claude Code -> Hybrid when pressure builds."""
+        """Auto-upgrade Claude Code → Hybrid when pressure builds."""
         usage_ratio = (
             self.store.total_active_tokens() / self.config.total_token_budget
             if self.config.total_token_budget > 0 else 0
@@ -190,4 +212,3 @@ class ContextManager:
             self.assembler.config = new_config
             # Re-classify with new config
             self.classifier.classify(self.store.all(), self.current_turn)
-            logger.info("Context mode upgraded: claude_code -> hybrid (turn %d)", self.current_turn)

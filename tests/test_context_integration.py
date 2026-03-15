@@ -18,7 +18,7 @@ async def test_multi_turn_conversation():
         cm.add_user_message(f"Question {i}: " + "detail " * 50)
         cm.add_tool_call("read_file", {"path": f"/file{i}.py"}, "x" * 2000)
         cm.add_assistant_reply(f"Answer {i}: the file contains data.")
-        messages = await cm.process_and_assemble()
+        messages, events = await cm.process_and_assemble()
         assert len(messages) > 0
 
     status = cm.get_status()
@@ -51,5 +51,5 @@ async def test_context_editing_flow():
     })
     assert "Pinned" in result
 
-    messages = await cm.process_and_assemble()
+    messages, events = await cm.process_and_assemble()
     assert len(messages) > 0

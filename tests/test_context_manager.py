@@ -67,11 +67,12 @@ async def test_process_and_assemble_returns_messages():
     cm.init_system("system prompt")
     cm.add_user_message("hello")
     cm.add_assistant_reply("hi there")
-    messages = await cm.process_and_assemble()
+    messages, events = await cm.process_and_assemble()
     assert len(messages) >= 2
     roles = [m["role"] for m in messages]
     assert "system" in roles
     assert "user" in roles
+    assert any("assembled" in e for e in events)
 
 
 async def test_handle_context_tool():
@@ -138,7 +139,8 @@ async def test_mode_upgrade_claude_code_to_hybrid():
         cm.add_user_message(f"msg {i}")
         cm.add_tool_call("bash", {}, "x" * 200)
 
-    await cm.process_and_assemble()
+    messages, events = await cm.process_and_assemble()
     # Should have upgraded to hybrid
+    assert any("mode_upgrade" in e for e in events)
     assert cm.config.l1_window_turns == 8
     assert cm.config.layering_enabled is True

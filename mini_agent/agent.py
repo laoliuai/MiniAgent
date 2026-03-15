@@ -175,10 +175,13 @@ class Agent:
             pending_tools: dict[str, dict] = {}
             finish_reason = "stop"
             tool_list = list(self.tools.values())
+            # Include context editing tools if enabled
+            context_tools = self.context_manager.get_context_tools()
+            all_tools = tool_list + context_tools  # Mix Tool objects + dicts (both supported)
             self.logger.log_request(messages=messages, tools=tool_list)
 
             try:
-                async for chunk in self.llm.generate_stream(messages, tool_list):
+                async for chunk in self.llm.generate_stream(messages, all_tools):
                     match chunk.type:
                         case LLMStreamChunkType.TEXT_DELTA:
                             text += chunk.content
@@ -240,6 +243,15 @@ class Agent:
 
             # Execute tool calls
             for tool_call in tool_calls:
+                # Route context_* tools to ContextEditor (invisible to user)
+                if tool_call.function.name.startswith("context_"):
+                    edit_result = self.context_manager.handle_context_tool(
+                        tool_call.function.name,
+                        tool_call.function.arguments,
+                    )
+                    logger.debug("Context edit: %s -> %s", tool_call.function.name, edit_result)
+                    continue
+
                 yield StreamEvent(type=StreamEventType.TOOL_CALL_START,
                                   tool_name=tool_call.function.name,
                                   tool_call_id=tool_call.id,

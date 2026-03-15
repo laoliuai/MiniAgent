@@ -103,4 +103,21 @@ class BudgetAssembler:
                 stable.append(msg)
             else:
                 volatile.append(msg)
-        return stable + volatile
+        result = stable + volatile
+        return self._merge_consecutive_roles(result)
+
+    def _merge_consecutive_roles(self, messages):
+        """Merge consecutive same-role user messages to satisfy alternating role constraint."""
+        if not messages:
+            return messages
+        merged = [messages[0]]
+        for msg in messages[1:]:
+            prev = merged[-1]
+            # Only merge consecutive user text messages (not tool_result lists)
+            if (msg["role"] == "user" and prev["role"] == "user"
+                    and isinstance(msg.get("content", ""), str)
+                    and isinstance(prev.get("content", ""), str)):
+                prev["content"] = prev["content"] + "\n\n" + msg["content"]
+            else:
+                merged.append(msg)
+        return merged

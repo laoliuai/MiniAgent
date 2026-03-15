@@ -70,8 +70,9 @@ def test_messages_sorted_by_turn():
     ]
     messages, used = assembler.assemble(blocks)
     assert messages[0]["role"] == "system"
+    # Consecutive user messages get merged to satisfy alternating role constraint
     assert "msg1" in messages[1]["content"]
-    assert "msg3" in messages[2]["content"]
+    assert "msg3" in messages[1]["content"]
 
 
 def test_claude_code_mode_no_l2_l3():

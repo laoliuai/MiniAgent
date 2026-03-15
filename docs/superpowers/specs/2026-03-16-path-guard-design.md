@@ -82,6 +82,19 @@ class ToolsConfig(BaseModel):
     path_guard: PathGuardConfig = PathGuardConfig()
 ```
 
+**Config.from_yaml() update:** The `from_yaml()` method must parse `path_guard` from `tools_data`:
+
+```python
+# In Config.from_yaml(), after existing tools parsing
+path_guard_data = tools_data.get("path_guard", {})
+path_guard_config = PathGuardConfig(**path_guard_data)
+
+tools_config = ToolsConfig(
+    # ... existing fields ...
+    path_guard=path_guard_config,
+)
+```
+
 ### PathGuard Module
 
 **File:** `mini_agent/tools/path_guard.py`
@@ -105,13 +118,14 @@ class PathGuard:
             return
         resolved = path.resolve()
 
-        # 1. Workspace → allow
-        if resolved.is_relative_to(self.workspace_dir):
-            return
-
-        # 2. Source dir → check whitelist
+        # 1. Source dir → check whitelist (BEFORE workspace check,
+        #    because source_dir may be inside workspace_dir)
         if resolved.is_relative_to(self.source_dir):
             self._check_source_whitelist(resolved, mode)
+            return
+
+        # 2. Workspace → allow
+        if resolved.is_relative_to(self.workspace_dir):
             return
 
         # 3. Extra writable → allow read+write
@@ -140,67 +154,96 @@ class PathGuard:
 
 **Key implementation details:**
 
-- `path.resolve()` called first — normalizes `../`, resolves symlinks
+- `path.resolve()` called first — normalizes `../`, resolves symlinks (including symlinks within workspace that point outside it)
+- **Source check runs before workspace check** — prevents bypass when `source_dir` is a subdirectory of `workspace_dir` (common case: workspace is the repo root, `mini_agent/` is inside it)
 - Write permission implies read — `extra_writable_paths` entries are auto-readable
-- `source_dir` auto-discovered via `Path(__file__).parent.parent` (from `path_guard.py` → `tools/` → `mini_agent/`)
+- `source_dir` discovered via `Config.get_package_dir()` (returns `Path(__file__).parent` from `config.py`, i.e. `mini_agent/`)
 - `_matches_extra()` checks `is_relative_to()` — a path matches if it's inside any listed directory
 
 ### Source Whitelist Parsing
 
 ```python
-def _parse_whitelist(self, entries: list[str]) -> dict[Path, str]:
-    """Parse 'relative/path:mode' entries."""
-    result = {}
+def _parse_whitelist(self, entries: list[str]) -> list[tuple[Path, str]]:
+    """Parse 'relative/path:mode' entries. Supports files and directories."""
+    result = []
     for entry in entries:
         parts = entry.rsplit(":", 1)
         rel_path = parts[0]
         mode = parts[1] if len(parts) > 1 else "r"
-        result[self.source_dir / rel_path] = mode  # "r" or "rw"
+        result.append((self.source_dir / rel_path, mode))  # "r" or "rw"
     return result
 
 def _check_source_whitelist(self, resolved: Path, mode: str):
-    allowed_mode = self._source_whitelist.get(resolved)
-    if allowed_mode is None:
-        raise PathGuardError(
-            f"Access denied: {resolved} is agent source code")
-    if mode == "w" and allowed_mode != "rw":
-        raise PathGuardError(
-            f"Write denied: {resolved} is read-only in source whitelist")
+    # Check both exact match and directory prefix match
+    for wl_path, allowed_mode in self._source_whitelist:
+        if resolved == wl_path or resolved.is_relative_to(wl_path):
+            if mode == "w" and allowed_mode != "rw":
+                raise PathGuardError(
+                    f"Write denied: {resolved} is read-only in source whitelist")
+            return  # Allowed
+    raise PathGuardError(
+        f"Access denied: {resolved} is agent source code")
 ```
+
+Whitelist supports both exact file paths and directory prefixes:
+- `"config/config.yaml:rw"` — matches only that file
+- `"config/:r"` — matches all files under `mini_agent/config/`
 
 ### Bash Command Auditing
 
 **File:** `mini_agent/tools/path_guard.py` (part of PathGuard class)
 
 ```python
-# Regex: tokens that look like file paths
+# Regex: tokens that look like file paths (unquoted and quoted)
 _PATH_PATTERN = re.compile(
-    r'(?:^|\s)'           # start of string or whitespace
-    r'([~./][\w./_-]*'    # starts with ~ . / ./
-    r'|/[\w./_-]+)',      # or absolute /path
+    r'(?:^|\s)'
+    r'([~./][\w./_-]*|/[\w./_-]+)'       # unquoted paths
+    r'|["\']([~./][^"\']*|/[^"\']*)["\']', # quoted paths
     re.MULTILINE
 )
 
-# Commands whose next argument is a write target
-_WRITE_COMMANDS = {"tee", "mv", "cp", "install", "rsync"}
+# Commands that write to their last path argument
+_WRITE_COMMANDS = {
+    "tee", "mv", "cp", "install", "rsync",
+    "rm", "mkdir", "touch", "ln", "dd", "chmod", "chown",
+}
+# sed -i is a special case (modifies files in-place)
+_INPLACE_FLAGS = {"sed": "-i", "perl": "-i", "sort": "-o"}
+
 _WRITE_REDIRECTS = re.compile(r'>{1,2}\s*([~./][\w./_-]*|/[\w./_-]+)')
 
 def _extract_paths(self, command: str) -> list[tuple[Path, str]]:
     results = []
 
-    # 1. Redirect targets (> file, >> file)
+    # 1. Redirect targets (> file, >> file) → write
     for m in self._WRITE_REDIRECTS.finditer(command):
         results.append((Path(m.group(1)).expanduser(), "w"))
 
-    # 2. General path tokens
-    for m in self._PATH_PATTERN.finditer(command):
-        p = Path(m.group(1).strip()).expanduser()
-        # Heuristic: check if preceding token is a write command
-        # For simplicity, default to "r"
-        results.append((p, "r"))
+    # 2. Split on pipes/semicolons, analyze each segment
+    segments = re.split(r'[|;]|&&', command)
+    for segment in segments:
+        tokens = shlex.split(segment, posix=True)
+        if not tokens:
+            continue
+        cmd = Path(tokens[0]).name  # strip /usr/bin/ prefix
+        is_write_cmd = cmd in self._WRITE_COMMANDS
+        has_inplace = (cmd in self._INPLACE_FLAGS
+                       and self._INPLACE_FLAGS[cmd] in tokens)
+
+        for token in tokens[1:]:
+            if token.startswith("-"):
+                continue  # skip flags
+            p = Path(token).expanduser()
+            if not (str(p).startswith("/") or str(p).startswith(".")
+                    or str(p).startswith("~")):
+                continue  # not a path-like token
+            mode = "w" if (is_write_cmd or has_inplace) else "r"
+            results.append((p, mode))
 
     return results
 ```
+
+Uses `shlex.split()` for proper token parsing (handles quotes, escapes). Splits on `|`, `;`, `&&` to analyze each command segment independently.
 
 **Known limitations (accepted by design):**
 - Variable expansion (`$HOME/secret`) — not detected

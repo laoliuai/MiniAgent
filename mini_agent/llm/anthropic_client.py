@@ -233,8 +233,8 @@ class AnthropicClient(LLMClientBase):
         content_blocks: dict[int, dict] = {}
         input_tokens = 0
 
-        async with stream_cm:
-            async for event in stream_cm:
+        async with stream_cm as stream:
+            async for event in stream:
                 if event.type == "message_start":
                     if hasattr(event, "message") and hasattr(event.message, "usage"):
                         input_tokens = getattr(event.message.usage, "input_tokens", 0) or 0

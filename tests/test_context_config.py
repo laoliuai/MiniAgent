@@ -61,3 +61,11 @@ def test_from_mode_with_overrides():
 def test_enable_context_editing_default_true():
     config = ContextConfig()
     assert config.enable_context_editing is True
+
+
+def test_context_config_in_project_config():
+    from mini_agent.config import Config
+    # Config requires llm.api_key — check that context field exists on the class
+    assert "context" in Config.model_fields
+    # Verify default value
+    assert Config.model_fields["context"].default == ContextConfig()

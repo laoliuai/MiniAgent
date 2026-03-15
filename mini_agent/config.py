@@ -9,6 +9,8 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field
 
+from mini_agent.context.config import ContextConfig
+
 
 class LogLevel(str, Enum):
     MINIMAL = "minimal"
@@ -87,6 +89,7 @@ class Config(BaseModel):
     agent: AgentConfig
     tools: ToolsConfig
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    context: ContextConfig = ContextConfig()
 
     @classmethod
     def load(cls) -> "Config":
@@ -185,11 +188,22 @@ class Config(BaseModel):
             max_files=logging_data.get("max_files", 50),
         )
 
+        # Parse context configuration
+        context_data = data.get("context", {})
+        context_mode = context_data.pop("mode", None)
+        if context_mode:
+            context_config = ContextConfig.from_mode(context_mode, **context_data)
+        elif context_data:
+            context_config = ContextConfig(**context_data)
+        else:
+            context_config = ContextConfig()
+
         return cls(
             llm=llm_config,
             agent=agent_config,
             tools=tools_config,
             logging=logging_config,
+            context=context_config,
         )
 
     @staticmethod

@@ -159,6 +159,7 @@ class PathGuard:
 - Write permission implies read — `extra_writable_paths` entries are auto-readable
 - `source_dir` discovered via `Config.get_package_dir()` (returns `Path(__file__).parent` from `config.py`, i.e. `mini_agent/`)
 - `_matches_extra()` checks `is_relative_to()` — a path matches if it's inside any listed directory
+- **Immutable after construction** — all config is resolved in `__init__`. No runtime mutation, safe to share across concurrent tool calls
 
 ### Source Whitelist Parsing
 
@@ -194,14 +195,6 @@ Whitelist supports both exact file paths and directory prefixes:
 **File:** `mini_agent/tools/path_guard.py` (part of PathGuard class)
 
 ```python
-# Regex: tokens that look like file paths (unquoted and quoted)
-_PATH_PATTERN = re.compile(
-    r'(?:^|\s)'
-    r'([~./][\w./_-]*|/[\w./_-]+)'       # unquoted paths
-    r'|["\']([~./][^"\']*|/[^"\']*)["\']', # quoted paths
-    re.MULTILINE
-)
-
 # Commands that write to their last path argument
 _WRITE_COMMANDS = {
     "tee", "mv", "cp", "install", "rsync",
@@ -217,12 +210,18 @@ def _extract_paths(self, command: str) -> list[tuple[Path, str]]:
 
     # 1. Redirect targets (> file, >> file) → write
     for m in self._WRITE_REDIRECTS.finditer(command):
-        results.append((Path(m.group(1)).expanduser(), "w"))
+        p = Path(m.group(1)).expanduser()
+        if not p.is_absolute():
+            p = self.workspace_dir / p
+        results.append((p, "w"))
 
     # 2. Split on pipes/semicolons, analyze each segment
     segments = re.split(r'[|;]|&&', command)
     for segment in segments:
-        tokens = shlex.split(segment, posix=True)
+        try:
+            tokens = shlex.split(segment, posix=True)
+        except ValueError:
+            tokens = segment.split()  # fallback for malformed quotes
         if not tokens:
             continue
         cmd = Path(tokens[0]).name  # strip /usr/bin/ prefix
@@ -237,6 +236,10 @@ def _extract_paths(self, command: str) -> list[tuple[Path, str]]:
             if not (str(p).startswith("/") or str(p).startswith(".")
                     or str(p).startswith("~")):
                 continue  # not a path-like token
+            # Resolve relative paths against workspace_dir (BashTool's CWD),
+            # not the Python process CWD
+            if not p.is_absolute():
+                p = self.workspace_dir / p
             mode = "w" if (is_write_cmd or has_inplace) else "r"
             results.append((p, mode))
 
@@ -248,7 +251,8 @@ Uses `shlex.split()` for proper token parsing (handles quotes, escapes). Splits 
 **Known limitations (accepted by design):**
 - Variable expansion (`$HOME/secret`) — not detected
 - Pipe chains (`echo | python -c "open(...)"`) — not detected
-- Quoted paths with special chars — partial detection
+- Quoted paths with special chars — partial detection (e.g., `> "/tmp/my file.txt"` not caught by redirect regex)
+- Malformed quotes (unclosed `"`) — falls back to `str.split()`, best-effort
 - This is best-effort: catches common `cat /path`, `vim /path`, `> /path` patterns
 
 ### Tool Integration
@@ -265,7 +269,7 @@ class ReadTool(Tool):
     async def execute(self, file_path: str, ...):
         resolved = self._resolve_path(file_path)
         if self.path_guard:
-            self.path_guard.check(resolved, "r")
+            self.path_guard.check(resolved, "r")  # raises PathGuardError
         # ... existing logic ...
 ```
 
@@ -280,15 +284,19 @@ async def execute(self, pattern: str, path: str = ".", ...):
     # ... existing logic ...
 ```
 
+**Note:** GrepTool searches recursively within a directory. When `path="."` (default, resolves to workspace), the search could traverse into `source_dir` if it's inside the workspace. This is acceptable — GrepTool's underlying `ripgrep`/`grep` reads files but doesn't modify them, and the agent source code is not secret (it's open source). The primary goal of PathGuard is preventing **writes** to source code and preventing access to paths **outside** the workspace. If stricter grep isolation is needed later, GrepTool can pass `--glob='!mini_agent/'` to ripgrep.
+
 **BashTool:**
 ```python
 async def execute(self, command: str, ...):
     if self.path_guard:
-        self.path_guard.audit_command(command)
+        self.path_guard.audit_command(command)  # raises PathGuardError
     # ... existing logic ...
 ```
 
 **PathGuard is optional** (`path_guard: PathGuard | None = None`) — tools work without it for backward compatibility and testing.
+
+**Error propagation:** `PathGuardError` inherits from `PermissionError`. The existing tools already have `except Exception` handlers that convert exceptions to failed `ToolResult(success=False, error=str(e))`. No dedicated `except PathGuardError` block is needed — the existing handlers produce clear error messages since `PathGuardError` includes descriptive text. For BashTool, the error similarly propagates through its existing exception handling to return a failed `BashOutputResult`.
 
 ### Agent / CLI Integration
 

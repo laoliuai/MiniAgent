@@ -115,7 +115,7 @@ class MiniMaxACPAgent:
                 return PromptResponse(stopReason="refusal")
         state.cancelled = False
         user_text = "\n".join(block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "") for block in params.prompt)
-        state.agent.messages.append(Message(role="user", content=user_text))
+        state.agent.add_user_message(user_text)
         stop_reason = await self._run_turn(state, params.sessionId)
         return PromptResponse(stopReason=stop_reason)
 

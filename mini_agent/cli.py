@@ -251,7 +251,7 @@ def print_session_info(agent: Agent, workspace_dir: Path, model: str):
     # Info lines
     print_info_line(f"Model: {model}")
     print_info_line(f"Workspace: {workspace_dir}")
-    print_info_line(f"Message History: {len(agent.messages)} messages")
+    print_info_line(f"Context Blocks: {agent.context_manager.get_status()['active_blocks']} active")
     print_info_line(f"Available Tools: {len(agent.tools)} tools")
 
     # Bottom border
@@ -267,21 +267,18 @@ def print_stats(agent: Agent, session_start: datetime):
     hours, remainder = divmod(int(duration.total_seconds()), 3600)
     minutes, seconds = divmod(remainder, 60)
 
-    # Count different types of messages
-    user_msgs = sum(1 for m in agent.messages if m.role == "user")
-    assistant_msgs = sum(1 for m in agent.messages if m.role == "assistant")
-    tool_msgs = sum(1 for m in agent.messages if m.role == "tool")
+    # Get context status from ContextManager
+    ctx_status = agent.context_manager.get_status()
 
     print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}Session Statistics:{Colors.RESET}")
     print(f"{Colors.DIM}{'─' * 40}{Colors.RESET}")
     print(f"  Session Duration: {hours:02d}:{minutes:02d}:{seconds:02d}")
-    print(f"  Total Messages: {len(agent.messages)}")
-    print(f"    - User Messages: {Colors.BRIGHT_GREEN}{user_msgs}{Colors.RESET}")
-    print(f"    - Assistant Replies: {Colors.BRIGHT_BLUE}{assistant_msgs}{Colors.RESET}")
-    print(f"    - Tool Calls: {Colors.BRIGHT_YELLOW}{tool_msgs}{Colors.RESET}")
+    print(f"  Total Blocks: {ctx_status['total_blocks']}")
+    print(f"  Active Blocks: {ctx_status['active_blocks']}")
+    print(f"  Active Tokens: {Colors.BRIGHT_MAGENTA}{ctx_status['total_active_tokens']:,}{Colors.RESET}")
+    print(f"  Budget Usage: {ctx_status['budget_usage']:.1%}")
+    print(f"  Current Turn: {ctx_status['current_turn']}")
     print(f"  Available Tools: {len(agent.tools)}")
-    if agent.api_total_tokens > 0:
-        print(f"  API Tokens Used: {Colors.BRIGHT_MAGENTA}{agent.api_total_tokens:,}{Colors.RESET}")
     print(f"{Colors.DIM}{'─' * 40}{Colors.RESET}\n")
 
 
@@ -816,14 +813,20 @@ async def run_agent(workspace_dir: Path, task: str = None):
                     continue
 
                 elif command == "/clear":
-                    # Clear message history but keep system prompt
-                    old_count = len(agent.messages)
-                    agent.messages = [agent.messages[0]]  # Keep only system message
-                    print(f"{Colors.GREEN}✅ Cleared {old_count - 1} messages, starting new session{Colors.RESET}\n")
+                    # Reset ContextManager — re-create with fresh store
+                    from .context import ContextConfig, ContextManager
+                    old_blocks = agent.context_manager.get_status()["total_blocks"]
+                    agent.context_manager = ContextManager(
+                        agent.context_manager.config, agent.llm, agent.tools)
+                    agent.messages = []
+                    print(f"{Colors.GREEN}✅ Cleared {old_blocks} blocks, starting new session{Colors.RESET}\n")
                     continue
 
                 elif command == "/history":
-                    print(f"\n{Colors.BRIGHT_CYAN}Current session message count: {len(agent.messages)}{Colors.RESET}\n")
+                    status = agent.context_manager.get_status()
+                    print(f"\n{Colors.BRIGHT_CYAN}Context: {status['active_blocks']} active blocks, "
+                          f"{status['total_active_tokens']:,} tokens, "
+                          f"turn {status['current_turn']}{Colors.RESET}\n")
                     continue
 
                 elif command == "/stats":

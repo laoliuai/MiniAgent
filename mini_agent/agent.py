@@ -7,8 +7,7 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Optional
 
-import tiktoken
-
+from .context import ContextConfig, ContextManager
 from .llm import LLMClient
 from .logger import AgentLogger
 from .schema import (
@@ -36,15 +35,16 @@ class Agent:
         tools: list[Tool],
         max_steps: int = 50,
         workspace_dir: str = "./workspace",
-        token_limit: int = 80000,  # Summary triggered when tokens exceed this value
+        context_config: ContextConfig | None = None,
         log_file_level: str = "standard",
         log_console_level: str = "minimal",
         log_max_files: int = 50,
+        # Deprecated: kept for backward compatibility, ignored if context_config is provided
+        token_limit: int = 80000,
     ):
         self.llm = llm_client
         self.tools = {tool.name: tool for tool in tools}
         self.max_steps = max_steps
-        self.token_limit = token_limit
         self.workspace_dir = Path(workspace_dir)
         # Cancellation event for interrupting agent execution (set externally, e.g., by Esc key)
         self.cancel_event: Optional[asyncio.Event] = None
@@ -59,9 +59,6 @@ class Agent:
 
         self.system_prompt = system_prompt
 
-        # Initialize message history
-        self.messages: list[Message] = [Message(role="system", content=system_prompt)]
-
         # Initialize logger
         from .config import LogLevel
         self.logger = AgentLogger(
@@ -70,14 +67,47 @@ class Agent:
             max_files=log_max_files,
         )
 
-        # Token usage from last API response (updated after each LLM call)
-        self.api_total_tokens: int = 0
-        # Flag to skip token check right after summary (avoid consecutive triggers)
-        self._skip_next_token_check: bool = False
+        # Initialize ContextManager
+        if context_config is None:
+            context_config = ContextConfig(total_token_budget=token_limit)
+        self.context_manager = ContextManager(context_config, self.llm, self.tools)
+
+        # Keep self.messages for backward compatibility (populated from ContextManager)
+        self.messages: list[Message] = []
 
     def add_user_message(self, content: str):
         """Add a user message to history."""
-        self.messages.append(Message(role="user", content=content))
+        self.context_manager.add_user_message(content)
+
+    def _dicts_to_messages(self, dicts: list[dict]) -> list[Message]:
+        """Convert BudgetAssembler output dicts to Message objects for LLM client."""
+        messages = []
+        for d in dicts:
+            # Handle tool_use blocks (assistant with tool_use)
+            if "tool_use" in d:
+                tu = d["tool_use"]
+                messages.append(Message(
+                    role="assistant",
+                    content="",
+                    tool_calls=[ToolCall(
+                        id=tu["id"], type="function",
+                        function=FunctionCall(name=tu["name"],
+                                              arguments=tu["input"]),
+                    )],
+                ))
+                continue
+            # Handle tool_result blocks
+            content = d.get("content", "")
+            if isinstance(content, list) and content and content[0].get("type") == "tool_result":
+                tr = content[0]
+                messages.append(Message(
+                    role="tool", content=tr["content"],
+                    tool_call_id=tr["tool_use_id"], name="",
+                ))
+                continue
+            # Normal message
+            messages.append(Message(role=d["role"], content=content or ""))
+        return messages
 
     def _check_cancelled(self) -> bool:
         """Check if agent execution has been cancelled.
@@ -90,225 +120,18 @@ class Agent:
         return False
 
     def _cleanup_incomplete_messages(self):
-        """Remove the incomplete assistant message and its partial tool results.
-
-        This ensures message consistency after cancellation by removing
-        only the current step's incomplete messages, preserving completed steps.
-        """
-        # Find the index of the last assistant message
-        last_assistant_idx = -1
-        for i in range(len(self.messages) - 1, -1, -1):
-            if self.messages[i].role == "assistant":
-                last_assistant_idx = i
-                break
-
-        if last_assistant_idx == -1:
-            # No assistant message found, nothing to clean
-            return
-
-        # Remove the last assistant message and all tool results after it
-        removed_count = len(self.messages) - last_assistant_idx
-        if removed_count > 0:
-            self.messages = self.messages[:last_assistant_idx]
-            logger.info(f"Cleaned up {removed_count} incomplete message(s)")
-
-    def _estimate_tokens(self) -> int:
-        """Accurately calculate token count for message history using tiktoken
-
-        Uses cl100k_base encoder (GPT-4/Claude/M2 compatible)
-        """
-        try:
-            # Use cl100k_base encoder (used by GPT-4 and most modern models)
-            encoding = tiktoken.get_encoding("cl100k_base")
-        except Exception:
-            # Fallback: if tiktoken initialization fails, use simple estimation
-            return self._estimate_tokens_fallback()
-
-        total_tokens = 0
-
-        for msg in self.messages:
-            # Count text content
-            if isinstance(msg.content, str):
-                total_tokens += len(encoding.encode(msg.content))
-            elif isinstance(msg.content, list):
-                for block in msg.content:
-                    if isinstance(block, dict):
-                        # Convert dict to string for calculation
-                        total_tokens += len(encoding.encode(str(block)))
-
-            # Count thinking
-            if msg.thinking:
-                total_tokens += len(encoding.encode(msg.thinking))
-
-            # Count tool_calls
-            if msg.tool_calls:
-                total_tokens += len(encoding.encode(str(msg.tool_calls)))
-
-            # Metadata overhead per message (approximately 4 tokens)
-            total_tokens += 4
-
-        return total_tokens
-
-    def _estimate_tokens_fallback(self) -> int:
-        """Fallback token estimation method (when tiktoken is unavailable)"""
-        total_chars = 0
-        for msg in self.messages:
-            if isinstance(msg.content, str):
-                total_chars += len(msg.content)
-            elif isinstance(msg.content, list):
-                for block in msg.content:
-                    if isinstance(block, dict):
-                        total_chars += len(str(block))
-
-            if msg.thinking:
-                total_chars += len(msg.thinking)
-
-            if msg.tool_calls:
-                total_chars += len(str(msg.tool_calls))
-
-        # Rough estimation: average 2.5 characters = 1 token
-        return int(total_chars / 2.5)
-
-    async def _summarize_messages(self):
-        """Message history summarization: summarize conversations between user messages when tokens exceed limit
-
-        Strategy (Agent mode):
-        - Keep all user messages (these are user intents)
-        - Summarize content between each user-user pair (agent execution process)
-        - If last round is still executing (has agent/tool messages but no next user), also summarize
-        - Structure: system -> user1 -> summary1 -> user2 -> summary2 -> user3 -> summary3 (if executing)
-
-        Summary is triggered when EITHER:
-        - Local token estimation exceeds limit
-        - API reported total_tokens exceeds limit
-        """
-        # Skip check if we just completed a summary (wait for next LLM call to update api_total_tokens)
-        if self._skip_next_token_check:
-            self._skip_next_token_check = False
-            return
-
-        estimated_tokens = self._estimate_tokens()
-
-        # Check both local estimation and API reported tokens
-        should_summarize = estimated_tokens > self.token_limit or self.api_total_tokens > self.token_limit
-
-        # If neither exceeded, no summary needed
-        if not should_summarize:
-            return
-
-        logger.info(
-            f"Token usage - Local estimate: {estimated_tokens}, API reported: {self.api_total_tokens}, Limit: {self.token_limit}"
-        )
-        logger.info("Triggering message history summarization...")
-
-        # Find all user message indices (skip system prompt)
-        user_indices = [i for i, msg in enumerate(self.messages) if msg.role == "user" and i > 0]
-
-        # Need at least 1 user message to perform summary
-        if len(user_indices) < 1:
-            logger.warning("Insufficient messages, cannot summarize")
-            return
-
-        # Build new message list
-        new_messages = [self.messages[0]]  # Keep system prompt
-        summary_count = 0
-
-        # Iterate through each user message and summarize the execution process after it
-        for i, user_idx in enumerate(user_indices):
-            # Add current user message
-            new_messages.append(self.messages[user_idx])
-
-            # Determine message range to summarize
-            # If last user, go to end of message list; otherwise to before next user
-            if i < len(user_indices) - 1:
-                next_user_idx = user_indices[i + 1]
-            else:
-                next_user_idx = len(self.messages)
-
-            # Extract execution messages for this round
-            execution_messages = self.messages[user_idx + 1 : next_user_idx]
-
-            # If there are execution messages in this round, summarize them
-            if execution_messages:
-                summary_text = await self._create_summary(execution_messages, i + 1)
-                if summary_text:
-                    summary_message = Message(
-                        role="user",
-                        content=f"[Assistant Execution Summary]\n\n{summary_text}",
-                    )
-                    new_messages.append(summary_message)
-                    summary_count += 1
-
-        # Replace message list
-        self.messages = new_messages
-
-        # Skip next token check to avoid consecutive summary triggers
-        # (api_total_tokens will be updated after next LLM call)
-        self._skip_next_token_check = True
-
-        new_tokens = self._estimate_tokens()
-        logger.info(f"Summary completed, local tokens: {estimated_tokens} -> {new_tokens}")
-        logger.info(f"Structure: system + {len(user_indices)} user messages + {summary_count} summaries")
-        logger.info("Note: API token count will update on next LLM call")
-
-    async def _create_summary(self, messages: list[Message], round_num: int) -> str:
-        """Create summary for one execution round
-
-        Args:
-            messages: List of messages to summarize
-            round_num: Round number
-
-        Returns:
-            Summary text
-        """
-        if not messages:
-            return ""
-
-        # Build summary content
-        summary_content = f"Round {round_num} execution process:\n\n"
-        for msg in messages:
-            if msg.role == "assistant":
-                content_text = msg.content if isinstance(msg.content, str) else str(msg.content)
-                summary_content += f"Assistant: {content_text}\n"
-                if msg.tool_calls:
-                    tool_names = [tc.function.name for tc in msg.tool_calls]
-                    summary_content += f"  -> Called tools: {', '.join(tool_names)}\n"
-            elif msg.role == "tool":
-                result_preview = msg.content if isinstance(msg.content, str) else str(msg.content)
-                summary_content += f"  <- Tool returned: {result_preview}...\n"
-
-        # Call LLM to generate concise summary
-        try:
-            summary_prompt = f"""Please provide a concise summary of the following Agent execution process:
-
-{summary_content}
-
-Requirements:
-1. Focus on what tasks were completed and which tools were called
-2. Keep key execution results and important findings
-3. Be concise and clear, within 1000 words
-4. Use English
-5. Do not include "user" related content, only summarize the Agent's execution process"""
-
-            summary_msg = Message(role="user", content=summary_prompt)
-            response = await self.llm.generate(
-                messages=[
-                    Message(
-                        role="system",
-                        content="You are an assistant skilled at summarizing Agent execution processes.",
-                    ),
-                    summary_msg,
-                ]
-            )
-
-            summary_text = response.content
-            logger.info(f"Summary for round {round_num} generated successfully")
-            return summary_text
-
-        except Exception as e:
-            logger.error(f"Summary generation failed for round {round_num}: {e}")
-            # Use simple text summary on failure
-            return summary_content
+        """Remove incomplete blocks from current turn on cancellation."""
+        from .context.models import BlockType, BlockStatus
+        current = self.context_manager.current_turn
+        blocks_to_remove = []
+        for block in self.context_manager.store.all():
+            if (block.turn_id == current
+                    and block.block_type == BlockType.TOOL_CALL
+                    and block.status == BlockStatus.ACTIVE):
+                blocks_to_remove.append(block.id)
+        for block_id in blocks_to_remove:
+            self.context_manager.store.remove(block_id)
+            logger.info(f"Cleaned up incomplete block: {block_id}")
 
     async def run_stream(self, cancel_event: Optional[asyncio.Event] = None) -> AsyncGenerator[StreamEvent, None]:
         """Execute agent loop as an async generator, yielding StreamEvent objects.
@@ -327,6 +150,10 @@ Requirements:
             self.cancel_event = cancel_event
         self.logger.start_new_run()
 
+        # Init system on first call
+        if not self.context_manager.store.get("system"):
+            self.context_manager.init_system(self.system_prompt)
+
         for step in range(self.max_steps):
             # Cancellation check
             if self._check_cancelled():
@@ -336,8 +163,11 @@ Requirements:
 
             yield StreamEvent(type=StreamEventType.STEP_START, step=step + 1)
 
-            # Token management
-            await self._summarize_messages()
+            # Context management: process and assemble messages
+            message_dicts = await self.context_manager.process_and_assemble()
+            messages = self._dicts_to_messages(message_dicts)
+            # Update self.messages for backward compatibility / logging
+            self.messages = messages
 
             # Stream LLM response
             text, thinking = "", ""
@@ -345,10 +175,10 @@ Requirements:
             pending_tools: dict[str, dict] = {}
             finish_reason = "stop"
             tool_list = list(self.tools.values())
-            self.logger.log_request(messages=self.messages, tools=tool_list)
+            self.logger.log_request(messages=messages, tools=tool_list)
 
             try:
-                async for chunk in self.llm.generate_stream(self.messages, tool_list):
+                async for chunk in self.llm.generate_stream(messages, tool_list):
                     match chunk.type:
                         case LLMStreamChunkType.TEXT_DELTA:
                             text += chunk.content
@@ -374,8 +204,7 @@ Requirements:
                                               arguments=json.loads(info["arguments_json"])))
                             tool_calls.append(tc)
                         case LLMStreamChunkType.USAGE:
-                            if chunk.usage:
-                                self.api_total_tokens = chunk.usage.total_tokens
+                            pass  # ContextManager tracks tokens internally
                         case LLMStreamChunkType.DONE:
                             finish_reason = chunk.finish_reason or "stop"
             except Exception as e:
@@ -387,23 +216,21 @@ Requirements:
                 yield StreamEvent(type=StreamEventType.ERROR, content=msg)
                 return
 
-            # Append complete assistant message to history
-            assistant_msg = Message(role="assistant", content=text,
-                                    thinking=thinking or None,
-                                    tool_calls=tool_calls or None)
-            self.messages.append(assistant_msg)
-            usage_data = None
-            if hasattr(self, 'api_total_tokens') and self.api_total_tokens:
-                usage_data = {"total_tokens": self.api_total_tokens}
             self.logger.log_response(content=text, thinking=thinking or None,
                                       tool_calls=tool_calls or None, finish_reason=finish_reason,
-                                      usage=usage_data)
+                                      usage=None)
 
             # No tool calls -> task complete
             if not tool_calls:
+                # Record assistant reply in ContextManager
+                self.context_manager.add_assistant_reply(text, thinking or None)
                 yield StreamEvent(type=StreamEventType.STEP_COMPLETE, step=step + 1)
                 yield StreamEvent(type=StreamEventType.DONE, content=text)
                 return
+
+            # Record assistant text (if any) alongside tool calls
+            if text:
+                self.context_manager.add_assistant_reply(text, thinking or None)
 
             # Cancellation check before tool execution
             if self._check_cancelled():
@@ -443,11 +270,13 @@ Requirements:
                                   tool_result=result,
                                   step=step + 1)
 
-                self.messages.append(Message(
-                    role="tool",
-                    content=result.content if result.success else f"Error: {result.error}",
+                # Record tool call in ContextManager
+                self.context_manager.add_tool_call(
+                    tool_call.function.name,
+                    tool_call.function.arguments,
+                    result.content if result.success else f"Error: {result.error}",
                     tool_call_id=tool_call.id,
-                    name=tool_call.function.name))
+                )
 
                 # Cancellation check after each tool
                 if self._check_cancelled():
@@ -485,6 +314,8 @@ Requirements:
                 return "Task cancelled by user."
         return final_text
 
-    def get_history(self) -> list[Message]:
-        """Get message history."""
-        return self.messages.copy()
+    def get_history(self) -> list[dict]:
+        """Return current context blocks as summary for external inspection."""
+        return [{"id": b.id, "type": b.block_type.value, "status": b.status.value,
+                 "turn": b.turn_id, "tokens": b.token_count}
+                for b in self.context_manager.store.active_blocks()]

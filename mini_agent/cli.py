@@ -32,6 +32,8 @@ from mini_agent import LLMClient
 from mini_agent.agent import Agent
 from mini_agent.agent_config import AgentConfig as RuntimeAgentConfig
 from mini_agent.config import Config
+from mini_agent.logger import AgentLogger
+from mini_agent.session import Session
 from mini_agent.schema import LLMProvider, StreamEventType
 from mini_agent.tools.base import Tool
 from mini_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
@@ -716,25 +718,60 @@ async def run_agent(workspace_dir: Path, task: str = None):
         # Remove placeholder if skills not enabled
         system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
 
-    # 7. Create Agent
-    agent_config = RuntimeAgentConfig(
-        system_prompt=system_prompt,
-        tools=tools,
-        max_steps_per_turn=config.agent.max_steps_per_turn,
-        max_steps_total=config.agent.max_steps_total,
-    )
-    agent = Agent(
-        llm_client=llm_client,
-        config=agent_config,
-        workspace_dir=str(workspace_dir),
-        log_file_level=config.logging.file_level.value,
-        log_console_level=config.logging.console_level.value,
-        log_max_files=config.logging.max_files,
+    # 7. Build tool registry for sub-agent tool name resolution
+    tool_registry: dict[str, Tool] = {tool.name: tool for tool in tools}
+
+    # 7.1 Build sub-agent AgentConfigs from YAML
+    sub_agent_configs = {}
+    for name, entry in config.sub_agents.items():
+        sub_tools = [tool_registry[t] for t in entry.tools if t in tool_registry]
+        sub_prompt = entry.system_prompt
+        if not sub_prompt and entry.system_prompt_path:
+            prompt_path = Config.find_config_file(entry.system_prompt_path)
+            if prompt_path and prompt_path.exists():
+                sub_prompt = prompt_path.read_text(encoding="utf-8")
+        sub_agent_configs[name] = RuntimeAgentConfig(
+            agent_id=name,
+            name=name,
+            description=entry.description,
+            model=entry.model,
+            system_prompt=sub_prompt or f"You are {name}.",
+            tools=sub_tools,
+            max_steps_total=config.agent.max_steps_total,
+        )
+
+    # 7.2 Create AgentLogger
+    agent_logger = AgentLogger(
+        file_level=config.logging.file_level,
+        console_level=config.logging.console_level,
+        max_files=config.logging.max_files,
     )
 
-    # 7.5 Wire PathGuard logger
-    if path_guard and hasattr(agent, 'logger'):
-        path_guard.logger = agent.logger
+    # 7.3 Create Session (replaces direct Agent construction)
+    session = Session.create(
+        llm_client=llm_client,
+        system_prompt=system_prompt,
+        tools=tools,
+        sub_agents=sub_agent_configs or None,
+        context_config=config.context,
+        workspace_dir=workspace_dir,
+        logger=agent_logger,
+        path_guard=path_guard,
+    )
+    agent = session.agent  # For backward compat with rest of CLI code
+
+    # 7.4 Wire PathGuard logger
+    if path_guard:
+        path_guard.logger = agent_logger
+
+    # 7.5 Log sub-agent info
+    if sub_agent_configs:
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "Configured %d sub-agents: %s",
+            len(sub_agent_configs),
+            list(sub_agent_configs.keys()),
+        )
 
     # 8. Display welcome information
     if not task:

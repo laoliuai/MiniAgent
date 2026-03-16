@@ -8,6 +8,7 @@ import pytest
 
 from mini_agent import LLMClient
 from mini_agent.agent import Agent
+from mini_agent.agent_config import AgentConfig as RuntimeAgentConfig
 from mini_agent.config import Config
 from mini_agent.tools import BashTool, EditTool, ReadTool, WriteTool
 
@@ -48,11 +49,15 @@ async def test_agent_simple_task():
         ]
 
         # Create agent
-        agent = Agent(
-            llm_client=llm_client,
+        agent_config = RuntimeAgentConfig(
             system_prompt=system_prompt,
             tools=tools,
-            max_steps=10,  # Limit steps for testing
+            max_steps_per_turn=10,
+            max_steps_total=10,
+        )
+        agent = Agent(
+            llm_client=llm_client,
+            config=agent_config,
             workspace_dir=workspace_dir,
         )
 
@@ -129,11 +134,15 @@ async def test_agent_bash_task():
         ]
 
         # Create agent
-        agent = Agent(
-            llm_client=llm_client,
+        agent_config = RuntimeAgentConfig(
             system_prompt=system_prompt,
             tools=tools,
-            max_steps=10,
+            max_steps_per_turn=10,
+            max_steps_total=10,
+        )
+        agent = Agent(
+            llm_client=llm_client,
+            config=agent_config,
             workspace_dir=workspace_dir,
         )
 

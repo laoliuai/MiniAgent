@@ -9,6 +9,7 @@ import pytest
 
 from mini_agent import LLMClient
 from mini_agent.agent import Agent
+from mini_agent.agent_config import AgentConfig as RuntimeAgentConfig
 from mini_agent.config import Config
 from mini_agent.tools import BashTool, EditTool, ReadTool, WriteTool
 from mini_agent.tools.mcp_loader import load_mcp_tools_async
@@ -86,11 +87,15 @@ async def test_basic_agent_usage():
             print(f"⚠️  MCP tools not loaded: {e}")
 
         # Create agent
-        agent = Agent(
-            llm_client=llm_client,
+        agent_config = RuntimeAgentConfig(
             system_prompt=system_prompt,
             tools=tools,
-            max_steps=config.agent.max_steps,
+            max_steps_per_turn=config.agent.max_steps,
+            max_steps_total=config.agent.max_steps,
+        )
+        agent = Agent(
+            llm_client=llm_client,
+            config=agent_config,
             workspace_dir=workspace_dir,
         )
 
@@ -168,11 +173,15 @@ You have record_note and recall_notes tools:
         ]
 
         print("\n📝 Creating Agent with Session Note tools...")
-        agent = Agent(
-            llm_client=llm_client,
+        agent_config = RuntimeAgentConfig(
             system_prompt=system_prompt,
             tools=tools,
-            max_steps=8,  # Reduced from 15
+            max_steps_per_turn=8,
+            max_steps_total=8,
+        )
+        agent = Agent(
+            llm_client=llm_client,
+            config=agent_config,
             workspace_dir=workspace_dir,
         )
 
@@ -212,11 +221,15 @@ You have record_note and recall_notes tools:
         print("=" * 80)
 
         # Task 2: New conversation - agent should recall memories
-        agent2 = Agent(
-            llm_client=llm_client,
+        agent2_config = RuntimeAgentConfig(
             system_prompt=system_prompt,
             tools=tools,
-            max_steps=5,  # Reduced from 10
+            max_steps_per_turn=5,
+            max_steps_total=5,
+        )
+        agent2 = Agent(
+            llm_client=llm_client,
+            config=agent2_config,
             workspace_dir=workspace_dir,
         )
 

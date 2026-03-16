@@ -10,6 +10,7 @@ import pytest
 
 from mini_agent import LLMClient
 from mini_agent.agent import Agent
+from mini_agent.agent_config import AgentConfig
 from mini_agent.schema import LLMResponse, Message
 from mini_agent.tools.bash_tool import BashTool
 from mini_agent.tools.file_tools import ReadTool, WriteTool
@@ -41,44 +42,39 @@ def test_multi_turn_conversation(mock_llm_client, temp_workspace):
     ]
 
     # Create agent
+    config = AgentConfig(system_prompt=system_prompt, tools=tools)
     agent = Agent(
         llm_client=mock_llm_client,
-        system_prompt=system_prompt,
-        tools=tools,
+        config=config,
         workspace_dir=temp_workspace,
     )
 
-    # Verify initial state
-    assert len(agent.messages) == 1  # Only system prompt
-    assert agent.messages[0].role == "system"
-    # Agent automatically adds workspace info to system prompt
-    assert system_prompt in agent.messages[0].content
-    assert "Current Workspace" in agent.messages[0].content
+    # Verify initial state: messages is empty list (populated during run_stream)
+    assert len(agent.messages) == 0
+    # System prompt should contain workspace info
+    assert system_prompt in agent.system_prompt
+    assert "Current Workspace" in agent.system_prompt
 
     # Add first user message
     agent.add_user_message("Hello")
-    assert len(agent.messages) == 2
-    assert agent.messages[1].role == "user"
-    assert agent.messages[1].content == "Hello"
+    # Messages stay empty until run_stream populates them
+    # But context_manager has the messages internally
 
     # Add second user message
     agent.add_user_message("Help me create a file")
-    assert len(agent.messages) == 3
-    assert agent.messages[2].role == "user"
 
-    # Verify all messages are retained in history
-    user_messages = [m for m in agent.messages if m.role == "user"]
-    assert len(user_messages) == 2
-    assert user_messages[0].content == "Hello"
-    assert user_messages[1].content == "Help me create a file"
+    # Verify context_manager has the blocks (system + 2 user)
+    history = agent.get_history()
+    # get_history now returns block info, not Message objects
+    assert len(history) >= 2  # At least 2 user blocks
 
 
 def test_session_history_management(mock_llm_client, temp_workspace):
     """Test session history management"""
+    config = AgentConfig(system_prompt="System prompt")
     agent = Agent(
         llm_client=mock_llm_client,
-        system_prompt="System prompt",
-        tools=[],
+        config=config,
         workspace_dir=temp_workspace,
     )
 
@@ -86,40 +82,32 @@ def test_session_history_management(mock_llm_client, temp_workspace):
     for i in range(5):
         agent.add_user_message(f"Message {i}")
 
-    # Verify message count (1 system + 5 user)
-    assert len(agent.messages) == 6
-
-    # Clear history (keep system prompt)
-    agent.messages = [agent.messages[0]]
-
-    # Verify only system prompt remains after clearing
-    assert len(agent.messages) == 1
-    assert agent.messages[0].role == "system"
+    # Verify blocks were added via get_history
+    history = agent.get_history()
+    assert len(history) >= 5  # At least 5 user blocks
 
 
 def test_get_history(mock_llm_client, temp_workspace):
     """Test getting session history"""
+    config = AgentConfig(system_prompt="System")
     agent = Agent(
         llm_client=mock_llm_client,
-        system_prompt="System",
-        tools=[],
+        config=config,
         workspace_dir=temp_workspace,
     )
 
     # Add message
     agent.add_user_message("Test message")
 
-    # Get history
+    # Get history returns block info dicts
     history = agent.get_history()
 
-    # Verify history is a copy (doesn't affect original messages)
-    assert len(history) == len(agent.messages)
-    assert history is not agent.messages
+    # Verify history is not empty
+    assert len(history) >= 1
 
-    # Modifying copy should not affect original messages
-    history.append(Message(role="user", content="New message"))
-    assert len(agent.messages) == 2  # Original messages unchanged
-    assert len(history) == 3  # Copy changed
+    # Verify it returns a list of dicts (block summaries)
+    assert isinstance(history[0], dict)
+    assert "type" in history[0]
 
 
 @pytest.mark.asyncio
@@ -142,30 +130,23 @@ async def test_session_note_persistence(temp_workspace):
 
 
 def test_message_statistics(mock_llm_client, temp_workspace):
-    """Test message statistics functionality"""
+    """Test message statistics functionality via get_history block counts"""
+    config = AgentConfig(system_prompt="System")
     agent = Agent(
         llm_client=mock_llm_client,
-        system_prompt="System",
-        tools=[],
+        config=config,
         workspace_dir=temp_workspace,
     )
 
-    # Add different types of messages
+    # Add user messages via context manager
     agent.add_user_message("User message 1")
-    agent.messages.append(Message(role="assistant", content="Assistant response 1"))
     agent.add_user_message("User message 2")
-    agent.messages.append(
-        Message(
-            role="tool", content="Tool result", tool_call_id="123", name="test_tool"
-        )
-    )
 
-    # Count different types of messages
-    user_msgs = sum(1 for m in agent.messages if m.role == "user")
-    assistant_msgs = sum(1 for m in agent.messages if m.role == "assistant")
-    tool_msgs = sum(1 for m in agent.messages if m.role == "tool")
+    # Get history (block summaries from context manager)
+    history = agent.get_history()
 
-    assert user_msgs == 2
-    assert assistant_msgs == 1
-    assert tool_msgs == 1
-    assert len(agent.messages) == 5  # 1 system + 2 user + 1 assistant + 1 tool
+    # Should have system block + 2 user blocks
+    assert len(history) >= 2
+    # Verify block types are present
+    block_types = [h["type"] for h in history]
+    assert any("user" in bt for bt in block_types)

@@ -32,6 +32,7 @@ from pydantic import field_validator
 from acp.schema import AgentCapabilities, Implementation, McpCapabilities
 
 from mini_agent.agent import Agent
+from mini_agent.agent_config import AgentConfig as RuntimeAgentConfig
 from mini_agent.cli import add_workspace_tools, initialize_base_tools
 from mini_agent.config import Config
 from mini_agent.llm import LLMClient
@@ -99,7 +100,13 @@ class MiniMaxACPAgent:
             workspace = workspace.resolve()
         tools = list(self._base_tools)
         add_workspace_tools(tools, self._config, workspace)
-        agent = Agent(llm_client=self._llm, system_prompt=self._system_prompt, tools=tools, max_steps=self._config.agent.max_steps, workspace_dir=str(workspace))
+        agent_config = RuntimeAgentConfig(
+            system_prompt=self._system_prompt,
+            tools=tools,
+            max_steps_per_turn=self._config.agent.max_steps,
+            max_steps_total=self._config.agent.max_steps,
+        )
+        agent = Agent(llm_client=self._llm, config=agent_config, workspace_dir=str(workspace))
         self._sessions[session_id] = SessionState(agent=agent)
         return NewSessionResponse(sessionId=session_id)
 

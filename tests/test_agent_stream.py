@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mini_agent.agent import Agent
+from mini_agent.agent_config import AgentConfig
 from mini_agent.schema import (
     LLMStreamChunk,
     LLMStreamChunkType,
@@ -22,7 +23,7 @@ def make_mock_llm(chunks_sequence):
     """
     call_count = [0]
 
-    async def mock_generate_stream(messages, tools=None):
+    async def mock_generate_stream(messages, tools=None, model=None):
         idx = min(call_count[0], len(chunks_sequence) - 1)
         call_count[0] += 1
         for chunk in chunks_sequence[idx]:
@@ -45,9 +46,10 @@ def make_text_chunks(text, finish_reason="stop"):
 
 
 @pytest.mark.asyncio
-async def test_run_stream_simple_text():
+async def test_run_stream_simple_text(tmp_path):
     llm = make_mock_llm([make_text_chunks("Hi")])
-    agent = Agent(llm_client=llm, system_prompt="test", tools=[], max_steps=5)
+    config = AgentConfig(system_prompt="test", tools=[], max_steps_per_turn=5, max_steps_total=5)
+    agent = Agent(llm_client=llm, config=config, workspace_dir=tmp_path)
     agent.add_user_message("hello")
 
     events = []
@@ -68,9 +70,10 @@ async def test_run_stream_simple_text():
 
 
 @pytest.mark.asyncio
-async def test_run_returns_final_text():
+async def test_run_returns_final_text(tmp_path):
     llm = make_mock_llm([make_text_chunks("Hello world")])
-    agent = Agent(llm_client=llm, system_prompt="test", tools=[], max_steps=5)
+    config = AgentConfig(system_prompt="test", tools=[], max_steps_per_turn=5, max_steps_total=5)
+    agent = Agent(llm_client=llm, config=config, workspace_dir=tmp_path)
     agent.add_user_message("hi")
 
     result = await agent.run()
@@ -78,7 +81,7 @@ async def test_run_returns_final_text():
 
 
 @pytest.mark.asyncio
-async def test_run_stream_with_tool_call():
+async def test_run_stream_with_tool_call(tmp_path):
     """Agent calls a tool, then returns final text."""
     # First LLM call: tool call
     tool_chunks = [
@@ -98,7 +101,8 @@ async def test_run_stream_with_tool_call():
     mock_tool.execute = AsyncMock(return_value=ToolResult(success=True, content="tool output"))
 
     llm = make_mock_llm([tool_chunks, final_chunks])
-    agent = Agent(llm_client=llm, system_prompt="test", tools=[mock_tool], max_steps=5)
+    config = AgentConfig(system_prompt="test", tools=[mock_tool], max_steps_per_turn=5, max_steps_total=5)
+    agent = Agent(llm_client=llm, config=config, workspace_dir=tmp_path)
     agent.add_user_message("use the tool")
 
     events = []
@@ -116,9 +120,10 @@ async def test_run_stream_with_tool_call():
 
 
 @pytest.mark.asyncio
-async def test_run_stream_cancellation():
+async def test_run_stream_cancellation(tmp_path):
     llm = make_mock_llm([make_text_chunks("Hi")])
-    agent = Agent(llm_client=llm, system_prompt="test", tools=[], max_steps=5)
+    config = AgentConfig(system_prompt="test", tools=[], max_steps_per_turn=5, max_steps_total=5)
+    agent = Agent(llm_client=llm, config=config, workspace_dir=tmp_path)
     agent.add_user_message("hello")
 
     cancel_event = asyncio.Event()
@@ -132,9 +137,9 @@ async def test_run_stream_cancellation():
 
 
 @pytest.mark.asyncio
-async def test_run_stream_error():
+async def test_run_stream_error(tmp_path):
     """LLM stream raises an exception."""
-    async def failing_stream(messages, tools=None):
+    async def failing_stream(messages, tools=None, model=None):
         raise ConnectionError("stream failed")
         yield  # make it a generator
 
@@ -142,7 +147,8 @@ async def test_run_stream_error():
     llm.generate_stream = failing_stream
     llm.generate = AsyncMock(return_value=MagicMock(content="summary"))
 
-    agent = Agent(llm_client=llm, system_prompt="test", tools=[], max_steps=5)
+    config = AgentConfig(system_prompt="test", tools=[], max_steps_per_turn=5, max_steps_total=5)
+    agent = Agent(llm_client=llm, config=config, workspace_dir=tmp_path)
     agent.add_user_message("hello")
 
     events = []
@@ -155,7 +161,7 @@ async def test_run_stream_error():
 
 
 @pytest.mark.asyncio
-async def test_run_stream_max_steps():
+async def test_run_stream_max_steps(tmp_path):
     """Agent exceeds max_steps."""
     # Always return a tool call so the loop never ends naturally
     tool_chunks = [
@@ -173,7 +179,8 @@ async def test_run_stream_max_steps():
     mock_tool.execute = AsyncMock(return_value=ToolResult(success=True, content="ok"))
 
     llm = make_mock_llm([tool_chunks] * 5)
-    agent = Agent(llm_client=llm, system_prompt="test", tools=[mock_tool], max_steps=3)
+    config = AgentConfig(system_prompt="test", tools=[mock_tool], max_steps_per_turn=3, max_steps_total=50)
+    agent = Agent(llm_client=llm, config=config, workspace_dir=tmp_path)
     agent.add_user_message("loop forever")
 
     events = []

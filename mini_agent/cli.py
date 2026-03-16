@@ -30,6 +30,7 @@ from prompt_toolkit.styles import Style
 
 from mini_agent import LLMClient
 from mini_agent.agent import Agent
+from mini_agent.agent_config import AgentConfig as RuntimeAgentConfig
 from mini_agent.config import Config
 from mini_agent.schema import LLMProvider, StreamEventType
 from mini_agent.tools.base import Tool
@@ -716,11 +717,15 @@ async def run_agent(workspace_dir: Path, task: str = None):
         system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
 
     # 7. Create Agent
-    agent = Agent(
-        llm_client=llm_client,
+    agent_config = RuntimeAgentConfig(
         system_prompt=system_prompt,
         tools=tools,
-        max_steps=config.agent.max_steps,
+        max_steps_per_turn=config.agent.max_steps,
+        max_steps_total=config.agent.max_steps,
+    )
+    agent = Agent(
+        llm_client=llm_client,
+        config=agent_config,
         workspace_dir=str(workspace_dir),
         log_file_level=config.logging.file_level.value,
         log_console_level=config.logging.console_level.value,

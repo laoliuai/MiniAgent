@@ -720,8 +720,8 @@ async def run_agent(workspace_dir: Path, task: str = None):
     agent_config = RuntimeAgentConfig(
         system_prompt=system_prompt,
         tools=tools,
-        max_steps_per_turn=config.agent.max_steps,
-        max_steps_total=config.agent.max_steps,
+        max_steps_per_turn=config.agent.max_steps_per_turn,
+        max_steps_total=config.agent.max_steps_total,
     )
     agent = Agent(
         llm_client=llm_client,

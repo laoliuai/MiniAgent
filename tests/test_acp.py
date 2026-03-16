@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from mini_agent.acp import MiniMaxACPAgent
-from mini_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+from mini_agent.config import AgentSettings, Config, LLMConfig, ToolsConfig
 from mini_agent.schema import FunctionCall, LLMResponse, ToolCall
 from mini_agent.tools.base import Tool, ToolResult
 
@@ -61,7 +61,7 @@ class EchoTool(Tool):
 def acp_agent(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        agent=AgentSettings(max_steps_per_turn=3, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(),
     )
     conn = DummyConn()

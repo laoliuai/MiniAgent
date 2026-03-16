@@ -104,7 +104,7 @@ You have record_note and recall_notes tools. Use them to:
             llm_client=llm_client,
             system_prompt=system_prompt,
             tools=tools,
-            max_steps=config.agent.max_steps,
+            max_steps=config.agent.max_steps_per_turn,
             workspace_dir=workspace_dir,
         )
 

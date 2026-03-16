@@ -38,12 +38,27 @@ class LLMConfig(BaseModel):
     retry: RetryConfig = Field(default_factory=RetryConfig)
 
 
-class AgentConfig(BaseModel):
-    """Agent configuration"""
+class AgentSettings(BaseModel):
+    """Agent configuration (renamed from AgentConfig to avoid collision with runtime AgentConfig)."""
 
-    max_steps: int = 50
+    max_steps_per_turn: int = 30
+    max_steps_total: int = 50
     workspace_dir: str = "./workspace"
     system_prompt_path: str = "system_prompt.md"
+
+
+# Backward-compat alias
+AgentConfig = AgentSettings
+
+
+class SubAgentEntry(BaseModel):
+    """YAML config for a sub-agent definition."""
+
+    description: str = ""
+    system_prompt: str = ""
+    system_prompt_path: str = ""
+    model: str | None = None
+    tools: list[str] = []
 
 
 class MCPConfig(BaseModel):
@@ -98,10 +113,11 @@ class Config(BaseModel):
     """Main configuration class"""
 
     llm: LLMConfig
-    agent: AgentConfig
+    agent: AgentSettings
     tools: ToolsConfig
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     context: ContextConfig = ContextConfig()
+    sub_agents: dict[str, SubAgentEntry] = {}
 
     @classmethod
     def load(cls) -> "Config":
@@ -161,9 +177,14 @@ class Config(BaseModel):
             retry=retry_config,
         )
 
-        # Parse Agent configuration
-        agent_config = AgentConfig(
-            max_steps=data.get("max_steps", 50),
+        # Parse Agent configuration (flat top-level keys, NOT nested "agent:" section)
+        max_steps_per_turn = data.get("max_steps_per_turn", 30)
+        # Backward compat: old "max_steps" maps to max_steps_per_turn
+        if "max_steps" in data and "max_steps_per_turn" not in data:
+            max_steps_per_turn = data.get("max_steps", 30)
+        agent_config = AgentSettings(
+            max_steps_per_turn=max_steps_per_turn,
+            max_steps_total=data.get("max_steps_total", 50),
             workspace_dir=data.get("workspace_dir", "./workspace"),
             system_prompt_path=data.get("system_prompt_path", "system_prompt.md"),
         )
@@ -215,12 +236,20 @@ class Config(BaseModel):
         else:
             context_config = ContextConfig()
 
+        # Parse sub-agent definitions
+        sub_agents_data = data.get("sub_agents", {})
+        sub_agents = {
+            name: SubAgentEntry(**entry)
+            for name, entry in sub_agents_data.items()
+        }
+
         return cls(
             llm=llm_config,
             agent=agent_config,
             tools=tools_config,
             logging=logging_config,
             context=context_config,
+            sub_agents=sub_agents,
         )
 
     @staticmethod

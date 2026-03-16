@@ -103,8 +103,8 @@ class MiniMaxACPAgent:
         agent_config = RuntimeAgentConfig(
             system_prompt=self._system_prompt,
             tools=tools,
-            max_steps_per_turn=self._config.agent.max_steps,
-            max_steps_total=self._config.agent.max_steps,
+            max_steps_per_turn=self._config.agent.max_steps_per_turn,
+            max_steps_total=self._config.agent.max_steps_total,
         )
         agent = Agent(llm_client=self._llm, config=agent_config, workspace_dir=str(workspace))
         self._sessions[session_id] = SessionState(agent=agent)

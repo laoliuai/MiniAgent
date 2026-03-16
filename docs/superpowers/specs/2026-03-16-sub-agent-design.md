@@ -18,6 +18,9 @@ MiniAgent currently operates as a single-agent system. The agent framework spec 
 - Parallel sub-agent execution (sub-agents run sequentially)
 - Sub-agent asking parent for clarification (tasks must be self-contained)
 - Adversarial security between agents (same trust boundary)
+- EventBus for cross-agent observability (framework spec Section 2.2; future work)
+- Preset agent template factory functions for SDK (framework spec Section 7; future work)
+- `max_turns` field in AgentConfig (the caller drives the multi-turn loop externally; the framework spec's `max_turns` is not needed at the Agent level)
 
 ---
 
@@ -100,6 +103,8 @@ class AgentSettings(BaseModel):
     system_prompt_path: str = "system_prompt.md"
 ```
 
+**Migration note:** The existing `AgentConfig.max_steps: int = 50` field is split into two fields. `Config.from_yaml()` must be updated to parse both `max_steps_per_turn` and `max_steps_total` from the YAML `agent` section, replacing the old `max_steps` parsing. For backward compatibility, if only `max_steps` is present in YAML, it maps to `max_steps_per_turn` with `max_steps_total` defaulting to 50.
+
 ---
 
 ## 2. Agent Constructor Refactor
@@ -151,14 +156,24 @@ class Agent:
         self.messages: list[Message] = []
 ```
 
+### Public Accessors
+
+```python
+@property
+def sub_agent_names(self) -> list[str]:
+    """Public accessor for registered sub-agent names."""
+    return list(self._sub_agents.keys())
+```
+
 ### register_sub_agent
 
 ```python
 def register_sub_agent(self, name: str, config: AgentConfig):
-    """Register a sub-agent configuration. Rebuilds delegation tool."""
+    """Register a sub-agent configuration. Rebuilds delegation tool and system prompt."""
     self._sub_agents[name] = config
     self.config.can_delegate = True
     self._register_auto_tools()
+    self._rebuild_system_block()  # Update system prompt with new sub-agent descriptions
 ```
 
 ### _register_auto_tools
@@ -234,6 +249,26 @@ def _build_system_prompt(self, base_prompt: str) -> str:
 
     return "".join(parts)
 ```
+
+### _rebuild_system_block
+
+Called after `register_sub_agent()` and before each turn (when SharedState changes). Regenerates the system prompt and updates the system block in ContextManager's BlockStore.
+
+```python
+def _rebuild_system_block(self):
+    """Rebuild system prompt and update system block in BlockStore."""
+    self.system_prompt = self._build_system_prompt(self.config.system_prompt)
+    system_block = self.context_manager.store.get("system")
+    if system_block:
+        system_block.working_content = self.system_prompt
+        system_block.token_count = count_tokens(self.system_prompt)
+```
+
+### Tool Sharing: Stateful Tool Considerations
+
+When sub-agents reference tools from the parent's tool registry (via CLI config), most tools are effectively stateless per-call (ReadTool, WriteTool, EditTool, GrepTool) and safe to share.
+
+**Stateful tools** (BashTool's background process registry, SessionNoteTool's memory file, TodoTool's task list) could interfere if shared between concurrent agents. Since sub-agents run **sequentially** (not in parallel), sharing is safe in practice. However, the spec notes this as a known limitation: if parallel sub-agent execution is added in the future, stateful tools must be cloned per sub-agent instance.
 
 ---
 
@@ -314,7 +349,8 @@ def _make_sub_agent_runner(self) -> SubAgentRunner:
 
         # Deep copy config to prevent mutation
         cfg = copy.deepcopy(config)
-        cfg.context_config = cfg.context_config or ContextConfig()
+        # Sub-agents default to claude_code mode (single task, no layering needed)
+        cfg.context_config = cfg.context_config or ContextConfig.from_mode("claude_code")
 
         # Prevent further delegation if at depth limit
         if self._delegation_depth >= self.config.max_delegation_depth - 1:
@@ -419,7 +455,8 @@ class SharedState:
 
     def snapshot(self) -> dict[str, str]:
         """Synchronous. Token-efficient summary for system prompt injection.
-        Keys + schema hints only, no actual values."""
+        Keys + schema hints only, no actual values.
+        Safe without lock: read-only dict iteration in single-threaded async loop."""
         return {
             k: f"{e.schema_hint} (by {e.written_by})"
             for k, e in self._store.items()
@@ -442,6 +479,8 @@ class StateWriteTool(Tool):
     """Write a value to shared state."""
     name = "state_write"
     # execute(key: str, value: str, schema_hint: str = "") -> ToolResult
+    # Note: value is stored as string (LLM can only produce text).
+    # Programmatic callers can store any type via SharedState.set() directly.
 
 class StateListTool(Tool):
     """List keys in shared state."""
@@ -491,8 +530,8 @@ class Session:
             "agent_id": self.agent.config.agent_id,
             "turn": self.agent.context_manager.current_turn,
             "context": self.agent.context_manager.get_status(),
-            "shared_state_keys": list(self.shared_state._store.keys()),
-            "sub_agents": list(self.agent._sub_agents.keys()),
+            "shared_state_keys": list(self.shared_state.snapshot().keys()),
+            "sub_agents": list(self.agent.sub_agent_names),  # Public accessor
         }
 ```
 
@@ -586,7 +625,7 @@ def create_orchestrator(
     )
 
     for name, w_cfg in workers.items():
-        w_cfg.context_config = w_cfg.context_config or ContextConfig()
+        w_cfg.context_config = w_cfg.context_config or ContextConfig.from_mode("claude_code")
         agent.register_sub_agent(name, w_cfg)
 
     return cls(agent=agent, shared_state=shared_state)
@@ -628,23 +667,25 @@ result = await session.run()
 
 ## 6. LLMClient Per-Call Model Override
 
-**Files:** `mini_agent/llm/llm_wrapper.py`, `anthropic_client.py`, `openai_client.py`
+**Files:** `mini_agent/llm/base.py`, `mini_agent/llm/llm_wrapper.py`, `anthropic_client.py`, `openai_client.py`
 
-Add optional `model` parameter to `generate_stream()`:
+Add optional `model` parameter to both `generate()` and `generate_stream()` across the full interface chain:
 
 ```python
-# LLMClient (llm_wrapper.py)
-async def generate_stream(
-    self, messages, tools, model: str | None = None
-) -> AsyncGenerator[LLMStreamChunk, None]:
+# LLMClientBase (base.py) - abstract method signatures
+async def generate_stream(self, messages, tools, model: str | None = None) -> AsyncGenerator[...]:
+    ...
+async def generate(self, messages, tools, model: str | None = None) -> LLMResponse:
+    ...  # Forwards model to generate_stream()
+
+# LLMClient (llm_wrapper.py) - wrapper, forwards model param
+async def generate_stream(self, messages, tools, model: str | None = None):
     ...
 
-# AnthropicClient
+# AnthropicClient / OpenAIClient
 async def generate_stream(self, messages, tools, model: str | None = None):
     use_model = model or self.model
     response = await self.client.messages.create(model=use_model, ...)
-
-# OpenAIClient - same pattern
 ```
 
 Agent passes `self.config.model` to LLM:
@@ -809,9 +850,10 @@ SharedState errors: State tool execute() wraps all exceptions into `ToolResult(s
 | `mini_agent/agent.py` | Constructor takes AgentConfig, register_sub_agent, _register_auto_tools, _make_sub_agent_runner, dual step limits in run_stream |
 | `mini_agent/config.py` | AgentConfig -> AgentSettings rename, SubAgentEntry, sub_agents parsing |
 | `mini_agent/cli.py` | Use Session.create(), build sub-agent configs from YAML |
-| `mini_agent/llm/llm_wrapper.py` | generate_stream adds model parameter |
-| `mini_agent/llm/anthropic_client.py` | generate_stream adds model parameter |
-| `mini_agent/llm/openai_client.py` | generate_stream adds model parameter |
+| `mini_agent/llm/base.py` | Abstract generate/generate_stream add model parameter |
+| `mini_agent/llm/llm_wrapper.py` | generate/generate_stream forward model parameter |
+| `mini_agent/llm/anthropic_client.py` | generate_stream uses model override |
+| `mini_agent/llm/openai_client.py` | generate_stream uses model override |
 
 ---
 

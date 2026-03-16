@@ -28,13 +28,19 @@ class PathGuard:
 
     _WRITE_REDIRECTS = re.compile(r">{1,2}")
 
-    def __init__(self, config: PathGuardConfig, workspace_dir: Path, source_dir: Path):
+    def __init__(self, config: PathGuardConfig, workspace_dir: Path, source_dir: Path, logger=None):
         self.enabled = config.enabled
         self.workspace_dir = workspace_dir.resolve()
         self.source_dir = source_dir.resolve()
         self._extra_readable = [Path(p).expanduser().resolve() for p in config.extra_readable_paths]
         self._extra_writable = [Path(p).expanduser().resolve() for p in config.extra_writable_paths]
         self._source_whitelist = self._parse_whitelist(config.source_whitelist)
+        self.logger = logger
+
+    def _deny(self, mode: str, resolved: Path, message: str) -> None:
+        if self.logger:
+            self.logger.log_context_event("path_guard", f"DENIED {mode} {resolved}")
+        raise PathGuardError(message)
 
     def check(self, path: Path, mode: Literal["r", "w"]) -> None:
         """Check whether a file access is allowed.
@@ -68,10 +74,11 @@ class PathGuard:
         if self._matches_extra(resolved, self._extra_readable):
             if mode == "r":
                 return
-            raise PathGuardError(f"Write denied: {resolved} is read-only")
+            self._deny(mode, resolved, f"Write denied: {resolved} is read-only")
 
         # 5. Default deny
-        raise PathGuardError(
+        self._deny(
+            mode, resolved,
             f"Access denied: {resolved} is outside the workspace and not in the allowed list"
         )
 
@@ -90,11 +97,9 @@ class PathGuard:
         for wl_path, allowed_mode in self._source_whitelist:
             if resolved == wl_path or resolved.is_relative_to(wl_path):
                 if mode == "w" and allowed_mode != "rw":
-                    raise PathGuardError(
-                        f"Write denied: {resolved} is read-only in source whitelist"
-                    )
+                    self._deny(mode, resolved, f"Write denied: {resolved} is read-only in source whitelist")
                 return
-        raise PathGuardError(f"Access denied: {resolved} is agent source code")
+        self._deny(mode, resolved, f"Access denied: {resolved} is agent source code")
 
     @staticmethod
     def _matches_extra(resolved: Path, extra_paths: list[Path]) -> bool:

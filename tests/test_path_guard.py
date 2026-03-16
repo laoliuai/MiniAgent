@@ -240,3 +240,39 @@ class TestBashAuditing:
         workspace, source = guard_dirs
         guard = make_guard(workspace, source, enabled=False)
         guard.audit_command(f"cat {source}/core.py")
+
+
+from unittest.mock import MagicMock
+
+
+def test_check_logs_denial(guard_dirs):
+    """PathGuard logs violations when a logger is provided."""
+    workspace, source = guard_dirs
+    mock_logger = MagicMock()
+    guard = make_guard(workspace, source)
+    guard.logger = mock_logger
+    with pytest.raises(PathGuardError):
+        guard.check(source / "core.py", "r")
+    mock_logger.log_context_event.assert_called_once()
+    call_args = mock_logger.log_context_event.call_args
+    assert "path_guard" in call_args[0][0]
+    assert "DENIED" in call_args[0][1]
+
+
+def test_check_no_log_when_allowed(guard_dirs):
+    """PathGuard does not log when access is allowed."""
+    workspace, source = guard_dirs
+    mock_logger = MagicMock()
+    guard = make_guard(workspace, source)
+    guard.logger = mock_logger
+    guard.check(workspace / "file.py", "r")
+    mock_logger.log_context_event.assert_not_called()
+
+
+def test_check_no_log_without_logger(guard_dirs):
+    """PathGuard works without logger (backward compat)."""
+    workspace, source = guard_dirs
+    guard = make_guard(workspace, source)
+    assert guard.logger is None
+    with pytest.raises(PathGuardError):
+        guard.check(source / "core.py", "r")

@@ -57,6 +57,19 @@ class Agent:
             workspace_info = f"\n\n## Current Workspace\nYou are currently working in: `{self.workspace_dir.absolute()}`\nAll relative paths will be resolved relative to this directory."
             system_prompt = system_prompt + workspace_info
 
+        # Append path access policy
+        path_policy = (
+            "\n\n## Path Access Policy\n"
+            "You operate under file access restrictions:\n"
+            "- Full read/write access within the workspace directory\n"
+            "- Access outside the workspace is restricted\n"
+            "- Your own source code is not accessible\n\n"
+            "If a file operation is denied, inform the user about the restriction.\n"
+            "Do NOT attempt to work around restrictions via bash, alternative paths, "
+            "or encoded commands."
+        )
+        system_prompt = system_prompt + path_policy
+
         self.system_prompt = system_prompt
 
         # Initialize logger

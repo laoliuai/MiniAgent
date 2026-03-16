@@ -47,9 +47,6 @@ class AgentSettings(BaseModel):
     system_prompt_path: str = "system_prompt.md"
 
 
-# Backward-compat alias
-AgentConfig = AgentSettings
-
 
 class SubAgentEntry(BaseModel):
     """YAML config for a sub-agent definition."""

@@ -292,6 +292,10 @@ class Agent:
             self.context_manager.init_system(self.system_prompt)
 
         for step in range(self.config.max_steps_per_turn):
+            # Refresh system prompt if SharedState has changed
+            if self.shared_state and self.shared_state.snapshot():
+                self._rebuild_system_block()
+
             # Total step limit check
             if self._step_count >= self.config.max_steps_total:
                 yield StreamEvent(type=StreamEventType.ERROR,
@@ -438,9 +442,6 @@ class Agent:
                     tool_call_id=tool_call.id,
                 )
 
-                # Track total steps
-                self._step_count += 1
-
                 # Cancellation check after each tool
                 if self._check_cancelled():
                     self._cleanup_incomplete_messages()
@@ -448,6 +449,7 @@ class Agent:
                     return
 
             yield StreamEvent(type=StreamEventType.STEP_COMPLETE, step=step + 1)
+            self._step_count += 1
 
         # Max steps exceeded
         yield StreamEvent(type=StreamEventType.ERROR,

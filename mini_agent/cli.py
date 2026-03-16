@@ -832,7 +832,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
     # Use FileHistory for persistent history across sessions (stored in user's home directory)
     history_file = Path.home() / ".mini-agent" / ".history"
     history_file.parent.mkdir(parents=True, exist_ok=True)
-    session = PromptSession(
+    prompt_session = PromptSession(
         history=FileHistory(str(history_file)),
         auto_suggest=AutoSuggestFromHistory(),
         completer=command_completer,
@@ -844,7 +844,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
     while True:
         try:
             # Get user input using prompt_toolkit
-            user_input = await session.prompt_async(
+            user_input = await prompt_session.prompt_async(
                 [
                     ("class:prompt", "You"),
                     ("", " › "),

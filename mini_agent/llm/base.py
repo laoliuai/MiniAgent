@@ -50,6 +50,7 @@ class LLMClientBase(ABC):
         self,
         messages: list[Message],
         tools: list[Any] | None = None,
+        model: str | None = None,
     ) -> LLMResponse:
         """Collect generate_stream() into a complete LLMResponse."""
         text, thinking = "", ""
@@ -57,7 +58,7 @@ class LLMClientBase(ABC):
         pending_tools: dict[str, dict] = {}
         usage, finish_reason = None, "stop"
 
-        async for chunk in self.generate_stream(messages, tools):
+        async for chunk in self.generate_stream(messages, tools, model=model):
             match chunk.type:
                 case LLMStreamChunkType.TEXT_DELTA:
                     text += chunk.content
@@ -101,6 +102,7 @@ class LLMClientBase(ABC):
         self,
         messages: list[Message],
         tools: list[Any] | None = None,
+        model: str | None = None,
     ) -> AsyncGenerator[LLMStreamChunk, None]:
         """Subclasses must implement this to yield LLMStreamChunks."""
         ...  # pragma: no cover

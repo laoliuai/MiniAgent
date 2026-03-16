@@ -116,23 +116,26 @@ class LLMClient:
         self,
         messages: list[Message],
         tools: list | None = None,
+        model: str | None = None,
     ) -> LLMResponse:
         """Generate response from LLM.
 
         Args:
             messages: List of conversation messages
             tools: Optional list of Tool objects or dicts
+            model: Optional model override for this call
 
         Returns:
             LLMResponse containing the generated content
         """
-        return await self._client.generate(messages, tools)
+        return await self._client.generate(messages, tools, model=model)
 
     async def generate_stream(
         self,
         messages: list[Message],
         tools: list | None = None,
+        model: str | None = None,
     ) -> AsyncGenerator[LLMStreamChunk, None]:
         """Stream response from LLM."""
-        async for chunk in self._client.generate_stream(messages, tools):
+        async for chunk in self._client.generate_stream(messages, tools, model=model):
             yield chunk

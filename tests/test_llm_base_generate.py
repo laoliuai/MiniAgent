@@ -23,7 +23,7 @@ class FakeStreamClient(LLMClientBase):
         super().__init__(api_key="fake", api_base="http://fake", model="fake")
         self._chunks = chunks
 
-    async def generate_stream(self, messages, tools=None):
+    async def generate_stream(self, messages, tools=None, model=None):
         for chunk in self._chunks:
             yield chunk
 

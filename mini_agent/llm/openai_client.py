@@ -206,6 +206,7 @@ class OpenAIClient(LLMClientBase):
         self,
         messages: list[Message],
         tools: list[Any] | None = None,
+        model: str | None = None,
     ) -> AsyncGenerator[LLMStreamChunk, None]:
         """Stream response chunks from OpenAI LLM.
 
@@ -215,14 +216,16 @@ class OpenAIClient(LLMClientBase):
         Args:
             messages: List of conversation messages
             tools: Optional list of available tools
+            model: Optional model override for this call
 
         Yields:
             LLMStreamChunk for each meaningful event in the stream
         """
         # Build API params
         _, api_messages = self._convert_messages(messages)
+        use_model = model or self.model
         params: dict[str, Any] = {
-            "model": self.model,
+            "model": use_model,
             "messages": api_messages,
             "extra_body": {"reasoning_split": True},
         }

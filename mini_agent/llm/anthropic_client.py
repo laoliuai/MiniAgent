@@ -202,6 +202,7 @@ class AnthropicClient(LLMClientBase):
         self,
         messages: list[Message],
         tools: list[Any] | None = None,
+        model: str | None = None,
     ) -> AsyncGenerator[LLMStreamChunk, None]:
         """Stream response chunks from Anthropic LLM.
 
@@ -211,14 +212,16 @@ class AnthropicClient(LLMClientBase):
         Args:
             messages: List of conversation messages
             tools: Optional list of available tools
+            model: Optional model override for this call
 
         Yields:
             LLMStreamChunk for each meaningful event in the stream
         """
         # Build API params
         system_message, api_messages = self._convert_messages(messages)
+        use_model = model or self.model
         params: dict[str, Any] = {
-            "model": self.model,
+            "model": use_model,
             "max_tokens": 16384,
             "messages": api_messages,
         }

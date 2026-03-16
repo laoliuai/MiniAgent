@@ -432,7 +432,7 @@ async def initialize_base_tools(config: Config):
     return tools, skill_loader
 
 
-def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path):
+def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path) -> "PathGuard | None":
     """Add workspace-dependent tools
 
     These tools need to know the workspace directory.
@@ -441,6 +441,9 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path):
         tools: Existing tools list to add to
         config: Configuration object
         workspace_dir: Workspace directory path
+
+    Returns:
+        PathGuard instance if enabled, None otherwise
     """
     # Ensure workspace directory exists
     workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -482,6 +485,8 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path):
     if config.tools.enable_todo:
         tools.append(TodoTool())
         print(f"{Colors.GREEN}✅ Loaded Todo tool{Colors.RESET}")
+
+    return path_guard
 
 
 async def _quiet_cleanup():
@@ -685,7 +690,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
     tools, skill_loader = await initialize_base_tools(config)
 
     # 4. Add workspace-dependent tools
-    add_workspace_tools(tools, config, workspace_dir)
+    path_guard = add_workspace_tools(tools, config, workspace_dir)
 
     # 5. Load System Prompt (with priority search)
     system_prompt_path = Config.find_config_file(config.agent.system_prompt_path)
@@ -721,6 +726,10 @@ async def run_agent(workspace_dir: Path, task: str = None):
         log_console_level=config.logging.console_level.value,
         log_max_files=config.logging.max_files,
     )
+
+    # 7.5 Wire PathGuard logger
+    if path_guard and hasattr(agent, 'logger'):
+        path_guard.logger = agent.logger
 
     # 8. Display welcome information
     if not task:

@@ -24,9 +24,9 @@ class PathGuard:
         "ln", "unlink", "truncate",
     })
 
-    _INPLACE_FLAGS = frozenset({"-i", "--in-place"})
+    _INPLACE_FLAGS = {"sed": {"-i", "--in-place"}, "perl": {"-i"}, "sort": {"-o"}}
 
-    _WRITE_REDIRECTS = re.compile(r">{1,2}")
+    _WRITE_REDIRECTS = re.compile(r'>{1,2}\s*([~./][\w./_-]*|/[\w./_-]+)')
 
     def __init__(self, config: PathGuardConfig, workspace_dir: Path, source_dir: Path, logger=None):
         self.enabled = config.enabled
@@ -146,24 +146,17 @@ class PathGuard:
         """Analyze a single command segment for file paths."""
         results: list[tuple[Path, str]] = []
 
-        # Check for write redirects: handle > and >> before shlex splitting
-        redirect_match = self._WRITE_REDIRECTS.split(segment)
-        if len(redirect_match) > 1:
-            # Everything after the last redirect is a write target
-            for part in redirect_match[1:]:
-                part = part.strip()
-                if part:
-                    try:
-                        tokens = shlex.split(part)
-                    except ValueError:
-                        tokens = part.split()
-                    for token in tokens:
-                        if self._looks_like_path(token):
-                            results.append((self._resolve_path(token), "w"))
-            # Analyze the part before the first redirect for read paths
-            segment = redirect_match[0].strip()
-            if not segment:
-                return results
+        # Check for write redirects (> file, >> file)
+        for m in self._WRITE_REDIRECTS.finditer(segment):
+            p = Path(m.group(1)).expanduser()
+            if not p.is_absolute():
+                p = self.workspace_dir / p
+            results.append((p, "w"))
+
+        # Strip redirect targets from segment before further analysis
+        segment = self._WRITE_REDIRECTS.sub("", segment).strip()
+        if not segment:
+            return results
 
         # Parse the segment with shlex
         try:
@@ -180,7 +173,7 @@ class PathGuard:
 
         # Determine if this is a write command
         is_write_cmd = cmd in self._WRITE_COMMANDS
-        has_inplace_flag = bool(self._INPLACE_FLAGS & set(args))
+        has_inplace_flag = cmd in self._INPLACE_FLAGS and bool(self._INPLACE_FLAGS[cmd] & set(args))
 
         for token in args:
             if token.startswith("-"):

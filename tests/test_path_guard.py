@@ -149,3 +149,94 @@ def test_path_traversal_normalized(guard_dirs):
     guard = make_guard(workspace, source)
     with pytest.raises(PathGuardError, match="outside the workspace"):
         guard.check(workspace / ".." / ".." / ".." / "etc" / "passwd", "r")
+
+
+class TestBashAuditing:
+    def test_read_command_detected(self, guard_dirs):
+        workspace, source = guard_dirs
+        guard = make_guard(workspace, source)
+        paths = guard._extract_paths("cat /etc/passwd")
+        assert any(str(p).endswith("passwd") and m == "r" for p, m in paths)
+
+    def test_write_redirect_detected(self, guard_dirs):
+        workspace, source = guard_dirs
+        guard = make_guard(workspace, source)
+        paths = guard._extract_paths("echo hello > /tmp/out.txt")
+        assert any(str(p).endswith("out.txt") and m == "w" for p, m in paths)
+
+    def test_append_redirect_detected(self, guard_dirs):
+        workspace, source = guard_dirs
+        guard = make_guard(workspace, source)
+        paths = guard._extract_paths("echo hello >> /tmp/log.txt")
+        assert any(str(p).endswith("log.txt") and m == "w" for p, m in paths)
+
+    def test_write_command_detected(self, guard_dirs):
+        workspace, source = guard_dirs
+        guard = make_guard(workspace, source)
+        paths = guard._extract_paths("cp /tmp/a.txt /tmp/b.txt")
+        assert any(m == "w" for _, m in paths)
+
+    def test_rm_detected_as_write(self, guard_dirs):
+        workspace, source = guard_dirs
+        guard = make_guard(workspace, source)
+        paths = guard._extract_paths("rm /tmp/secret.txt")
+        assert any(str(p).endswith("secret.txt") and m == "w" for p, m in paths)
+
+    def test_sed_inplace_detected(self, guard_dirs):
+        workspace, source = guard_dirs
+        guard = make_guard(workspace, source)
+        paths = guard._extract_paths("sed -i 's/old/new/' /tmp/file.txt")
+        assert any(str(p).endswith("file.txt") and m == "w" for p, m in paths)
+
+    def test_pipe_segments_analyzed(self, guard_dirs):
+        workspace, source = guard_dirs
+        guard = make_guard(workspace, source)
+        paths = guard._extract_paths("cat /tmp/a.txt | grep foo")
+        assert any(str(p).endswith("a.txt") and m == "r" for p, m in paths)
+
+    def test_semicolon_segments_analyzed(self, guard_dirs):
+        workspace, source = guard_dirs
+        guard = make_guard(workspace, source)
+        paths = guard._extract_paths("cd /tmp; rm ./file.txt")
+        assert any(m == "w" for _, m in paths)
+
+    def test_relative_path_resolved_against_workspace(self, guard_dirs):
+        workspace, source = guard_dirs
+        guard = make_guard(workspace, source)
+        paths = guard._extract_paths("cat ./file.py")
+        assert any(str(p).startswith(str(workspace)) for p, _ in paths)
+
+    def test_malformed_quotes_fallback(self, guard_dirs):
+        workspace, source = guard_dirs
+        guard = make_guard(workspace, source)
+        paths = guard._extract_paths('echo "hello /tmp/test.txt')
+        assert isinstance(paths, list)
+
+    def test_non_path_tokens_skipped(self, guard_dirs):
+        workspace, source = guard_dirs
+        guard = make_guard(workspace, source)
+        paths = guard._extract_paths("echo hello world 42")
+        assert len(paths) == 0
+
+    def test_flags_skipped(self, guard_dirs):
+        workspace, source = guard_dirs
+        guard = make_guard(workspace, source)
+        paths = guard._extract_paths("ls -la /tmp")
+        path_strs = [str(p) for p, _ in paths]
+        assert not any("-la" in s for s in path_strs)
+
+    def test_audit_command_denies_source_access(self, guard_dirs):
+        workspace, source = guard_dirs
+        guard = make_guard(workspace, source)
+        with pytest.raises(PathGuardError, match="agent source code"):
+            guard.audit_command(f"cat {source}/core.py")
+
+    def test_audit_command_allows_workspace(self, guard_dirs):
+        workspace, source = guard_dirs
+        guard = make_guard(workspace, source)
+        guard.audit_command(f"cat {workspace}/file.py")
+
+    def test_audit_command_disabled(self, guard_dirs):
+        workspace, source = guard_dirs
+        guard = make_guard(workspace, source, enabled=False)
+        guard.audit_command(f"cat {source}/core.py")

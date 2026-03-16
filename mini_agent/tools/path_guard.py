@@ -1,6 +1,8 @@
 """PathGuard: Agent file access control."""
 from __future__ import annotations
 
+import re
+import shlex
 from pathlib import Path
 from typing import Literal
 
@@ -15,6 +17,16 @@ class PathGuardError(PermissionError):
 
 class PathGuard:
     """File access control that restricts agent operations to allowed paths."""
+
+    _WRITE_COMMANDS = frozenset({
+        "cp", "mv", "rm", "rmdir", "mkdir", "touch", "tee",
+        "dd", "install", "rsync", "chmod", "chown", "chgrp",
+        "ln", "unlink", "truncate",
+    })
+
+    _INPLACE_FLAGS = frozenset({"-i", "--in-place"})
+
+    _WRITE_REDIRECTS = re.compile(r">{1,2}")
 
     def __init__(self, config: PathGuardConfig, workspace_dir: Path, source_dir: Path):
         self.enabled = config.enabled
@@ -88,3 +100,121 @@ class PathGuard:
     def _matches_extra(resolved: Path, extra_paths: list[Path]) -> bool:
         """Check if resolved path falls under any of the extra paths."""
         return any(resolved.is_relative_to(p) for p in extra_paths)
+
+    def audit_command(self, command: str) -> None:
+        """Audit a bash command for file access violations.
+
+        Extracts file paths from the command and checks each one.
+
+        Args:
+            command: The shell command string to audit.
+
+        Raises:
+            PathGuardError: If any extracted path violates the policy.
+        """
+        if not self.enabled:
+            return
+
+        for path, mode in self._extract_paths(command):
+            self.check(path, mode)
+
+    def _extract_paths(self, command: str) -> list[tuple[Path, str]]:
+        """Extract file paths and their access modes from a shell command.
+
+        Splits on pipes and semicolons, then analyzes each segment.
+        Returns a list of (Path, mode) tuples where mode is "r" or "w".
+        """
+        results: list[tuple[Path, str]] = []
+
+        # Split command on pipes, semicolons, and &&
+        segments = re.split(r"\s*[|;]\s*|\s*&&\s*", command)
+
+        for segment in segments:
+            segment = segment.strip()
+            if not segment:
+                continue
+            results.extend(self._analyze_segment(segment))
+
+        return results
+
+    def _analyze_segment(self, segment: str) -> list[tuple[Path, str]]:
+        """Analyze a single command segment for file paths."""
+        results: list[tuple[Path, str]] = []
+
+        # Check for write redirects: handle > and >> before shlex splitting
+        redirect_match = self._WRITE_REDIRECTS.split(segment)
+        if len(redirect_match) > 1:
+            # Everything after the last redirect is a write target
+            for part in redirect_match[1:]:
+                part = part.strip()
+                if part:
+                    try:
+                        tokens = shlex.split(part)
+                    except ValueError:
+                        tokens = part.split()
+                    for token in tokens:
+                        if self._looks_like_path(token):
+                            results.append((self._resolve_path(token), "w"))
+            # Analyze the part before the first redirect for read paths
+            segment = redirect_match[0].strip()
+            if not segment:
+                return results
+
+        # Parse the segment with shlex
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            # Malformed quotes — fallback to simple split
+            tokens = segment.split()
+
+        if not tokens:
+            return results
+
+        cmd = tokens[0]
+        args = tokens[1:]
+
+        # Determine if this is a write command
+        is_write_cmd = cmd in self._WRITE_COMMANDS
+        has_inplace_flag = bool(self._INPLACE_FLAGS & set(args))
+
+        for token in args:
+            if token.startswith("-"):
+                continue
+            # Skip sed substitution patterns
+            if cmd == "sed" and ("/" in token and token.startswith("s")):
+                continue
+            if not self._looks_like_path(token):
+                continue
+
+            path = self._resolve_path(token)
+
+            if is_write_cmd:
+                results.append((path, "w"))
+            elif has_inplace_flag:
+                results.append((path, "w"))
+            else:
+                results.append((path, "r"))
+
+        return results
+
+    def _resolve_path(self, token: str) -> Path:
+        """Resolve a path token, using workspace_dir for relative paths."""
+        p = Path(token)
+        if not p.is_absolute():
+            p = self.workspace_dir / p
+        return p.resolve()
+
+    @staticmethod
+    def _looks_like_path(token: str) -> bool:
+        """Heuristic: does this token look like a file path?"""
+        if token.startswith("-"):
+            return False
+        # Must contain a slash or dot-prefixed, or have a file extension
+        if "/" in token or token.startswith("."):
+            return True
+        if "." in token and not token.replace(".", "").isdigit():
+            # Has a dot but isn't a number like "3.14"
+            parts = token.rsplit(".", 1)
+            if len(parts) == 2 and len(parts[1]) <= 10:
+                return True
+        return False

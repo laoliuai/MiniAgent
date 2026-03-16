@@ -18,8 +18,9 @@ class GrepTool(Tool):
 
     _search_tool_cache: str | None = None
 
-    def __init__(self, workspace_dir: str = "."):
+    def __init__(self, workspace_dir: str = ".", path_guard=None):
         self.workspace_dir = Path(workspace_dir).absolute()
+        self.path_guard = path_guard
 
     @property
     def name(self) -> str:
@@ -142,6 +143,10 @@ class GrepTool(Tool):
         """Execute search."""
         try:
             search_path = self._resolve_path(path)
+
+            if self.path_guard:
+                self.path_guard.check(search_path, "r")
+
             cmd = self._build_command(pattern, search_path, glob, context, output_mode)
 
             process = await asyncio.create_subprocess_exec(

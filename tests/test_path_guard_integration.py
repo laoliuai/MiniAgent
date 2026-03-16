@@ -5,6 +5,8 @@ from pathlib import Path
 from mini_agent.config import PathGuardConfig
 from mini_agent.tools.path_guard import PathGuard, PathGuardError
 from mini_agent.tools.file_tools import ReadTool, WriteTool, EditTool
+from mini_agent.tools.bash_tool import BashTool
+from mini_agent.tools.grep_tool import GrepTool
 
 
 @pytest.fixture
@@ -88,3 +90,41 @@ async def test_tools_work_without_path_guard():
         tool = ReadTool(workspace_dir=td)
         result = await tool.execute(path=str(td_path / "test.txt"))
         assert result.success
+
+
+# --- BashTool + GrepTool integration tests ---
+
+async def test_bash_tool_source_access_denied(guarded_env):
+    workspace, source, guard = guarded_env
+    tool = BashTool(workspace_dir=str(workspace), path_guard=guard)
+    result = await tool.execute(command=f"cat {source}/agent.py")
+    assert not result.success
+    assert "agent source code" in result.error
+
+async def test_bash_tool_workspace_allowed(guarded_env):
+    workspace, source, guard = guarded_env
+    (workspace / "hello.txt").write_text("hello")
+    tool = BashTool(workspace_dir=str(workspace), path_guard=guard)
+    result = await tool.execute(command=f"cat {workspace}/hello.txt")
+    assert result.success
+
+async def test_bash_tool_outside_denied(guarded_env):
+    workspace, source, guard = guarded_env
+    tool = BashTool(workspace_dir=str(workspace), path_guard=guard)
+    result = await tool.execute(command="cat /etc/passwd")
+    assert not result.success
+    assert "outside the workspace" in result.error
+
+async def test_grep_tool_source_denied(guarded_env):
+    workspace, source, guard = guarded_env
+    tool = GrepTool(workspace_dir=str(workspace), path_guard=guard)
+    result = await tool.execute(pattern="agent", path=str(source))
+    assert not result.success
+    assert "agent source code" in result.error
+
+async def test_grep_tool_workspace_allowed(guarded_env):
+    workspace, source, guard = guarded_env
+    (workspace / "code.py").write_text("def hello(): pass")
+    tool = GrepTool(workspace_dir=str(workspace), path_guard=guard)
+    result = await tool.execute(pattern="hello", path=str(workspace))
+    assert result.success

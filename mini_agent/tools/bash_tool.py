@@ -225,17 +225,19 @@ class BashTool(Tool):
     - Unix/Linux/macOS: bash
     """
 
-    def __init__(self, workspace_dir: str | None = None):
+    def __init__(self, workspace_dir: str | None = None, path_guard=None):
         """Initialize BashTool with OS-specific shell detection.
 
         Args:
             workspace_dir: Working directory for command execution.
                            If provided, all commands run in this directory.
                            If None, commands run in the process's cwd.
+            path_guard: Optional PathGuard instance for access control
         """
         self.is_windows = platform.system() == "Windows"
         self.shell_name = "PowerShell" if self.is_windows else "bash"
         self.workspace_dir = workspace_dir
+        self.path_guard = path_guard
 
     @property
     def name(self) -> str:
@@ -327,6 +329,9 @@ Examples:
         """
 
         try:
+            if self.path_guard:
+                self.path_guard.audit_command(command)
+
             # Validate timeout
             if timeout > 600:
                 timeout = 600

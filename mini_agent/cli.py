@@ -36,6 +36,7 @@ from mini_agent.tools.base import Tool
 from mini_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from mini_agent.tools.file_tools import EditTool, ReadTool, WriteTool
 from mini_agent.tools.grep_tool import GrepTool
+from mini_agent.tools.path_guard import PathGuard
 from mini_agent.tools.mcp_loader import cleanup_mcp_connections, load_mcp_tools_async, set_mcp_timeout_config
 from mini_agent.tools.note_tool import SessionNoteTool
 from mini_agent.tools.skill_tool import create_skill_tools
@@ -444,9 +445,15 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path):
     # Ensure workspace directory exists
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
+    # Create PathGuard for file access control
+    source_dir = Config.get_package_dir()  # mini_agent/
+    path_guard = PathGuard(config.tools.path_guard, workspace_dir, source_dir)
+    if config.tools.path_guard.enabled:
+        print(f"{Colors.GREEN}✅ PathGuard enabled (workspace: {workspace_dir}){Colors.RESET}")
+
     # Bash tool - needs workspace as cwd for command execution
     if config.tools.enable_bash:
-        bash_tool = BashTool(workspace_dir=str(workspace_dir))
+        bash_tool = BashTool(workspace_dir=str(workspace_dir), path_guard=path_guard)
         tools.append(bash_tool)
         print(f"{Colors.GREEN}✅ Loaded Bash tool (cwd: {workspace_dir}){Colors.RESET}")
 
@@ -454,16 +461,16 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path):
     if config.tools.enable_file_tools:
         tools.extend(
             [
-                ReadTool(workspace_dir=str(workspace_dir)),
-                WriteTool(workspace_dir=str(workspace_dir)),
-                EditTool(workspace_dir=str(workspace_dir)),
+                ReadTool(workspace_dir=str(workspace_dir), path_guard=path_guard),
+                WriteTool(workspace_dir=str(workspace_dir), path_guard=path_guard),
+                EditTool(workspace_dir=str(workspace_dir), path_guard=path_guard),
             ]
         )
         print(f"{Colors.GREEN}✅ Loaded file operation tools (workspace: {workspace_dir}){Colors.RESET}")
 
     # Grep tool - needs workspace to resolve relative search paths
     if config.tools.enable_grep:
-        tools.append(GrepTool(workspace_dir=str(workspace_dir)))
+        tools.append(GrepTool(workspace_dir=str(workspace_dir), path_guard=path_guard))
         print(f"{Colors.GREEN}✅ Loaded Grep tool{Colors.RESET}")
 
     # Session note tool - needs workspace to store memory file

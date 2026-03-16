@@ -62,6 +62,15 @@ class LoggingConfig(BaseModel):
     max_files: int = 50
 
 
+class PathGuardConfig(BaseModel):
+    """PathGuard file access control configuration"""
+
+    enabled: bool = True
+    extra_readable_paths: list[str] = []
+    extra_writable_paths: list[str] = []
+    source_whitelist: list[str] = []
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration"""
 
@@ -80,6 +89,9 @@ class ToolsConfig(BaseModel):
     enable_mcp: bool = True
     mcp_config_path: str = "mcp.json"
     mcp: MCPConfig = Field(default_factory=MCPConfig)
+
+    # PathGuard
+    path_guard: PathGuardConfig = Field(default_factory=PathGuardConfig)
 
 
 class Config(BaseModel):
@@ -167,6 +179,10 @@ class Config(BaseModel):
             sse_read_timeout=mcp_data.get("sse_read_timeout", 120.0),
         )
 
+        # Parse PathGuard configuration
+        path_guard_data = tools_data.get("path_guard", {})
+        path_guard_config = PathGuardConfig(**path_guard_data)
+
         tools_config = ToolsConfig(
             enable_file_tools=tools_data.get("enable_file_tools", True),
             enable_bash=tools_data.get("enable_bash", True),
@@ -178,6 +194,7 @@ class Config(BaseModel):
             enable_mcp=tools_data.get("enable_mcp", True),
             mcp_config_path=tools_data.get("mcp_config_path", "mcp.json"),
             mcp=mcp_config,
+            path_guard=path_guard_config,
         )
 
         # Parse logging configuration

@@ -69,13 +69,15 @@ PREVIEW_LINES = 100
 class ReadTool(Tool):
     """Read file content."""
 
-    def __init__(self, workspace_dir: str = "."):
+    def __init__(self, workspace_dir: str = ".", path_guard=None):
         """Initialize ReadTool with workspace directory.
 
         Args:
             workspace_dir: Base directory for resolving relative paths
+            path_guard: Optional PathGuard instance for access control
         """
         self.workspace_dir = Path(workspace_dir).absolute()
+        self.path_guard = path_guard
 
     @property
     def name(self) -> str:
@@ -118,6 +120,9 @@ class ReadTool(Tool):
             # Resolve relative paths relative to workspace_dir
             if not file_path.is_absolute():
                 file_path = self.workspace_dir / file_path
+
+            if self.path_guard:
+                self.path_guard.check(file_path, "r")
 
             if not file_path.exists():
                 return ToolResult(
@@ -181,13 +186,15 @@ class ReadTool(Tool):
 class WriteTool(Tool):
     """Write content to a file."""
 
-    def __init__(self, workspace_dir: str = "."):
+    def __init__(self, workspace_dir: str = ".", path_guard=None):
         """Initialize WriteTool with workspace directory.
 
         Args:
             workspace_dir: Base directory for resolving relative paths
+            path_guard: Optional PathGuard instance for access control
         """
         self.workspace_dir = Path(workspace_dir).absolute()
+        self.path_guard = path_guard
 
     @property
     def name(self) -> str:
@@ -226,6 +233,9 @@ class WriteTool(Tool):
             if not file_path.is_absolute():
                 file_path = self.workspace_dir / file_path
 
+            if self.path_guard:
+                self.path_guard.check(file_path, "w")
+
             # Create parent directories if they don't exist
             file_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -241,13 +251,15 @@ class WriteTool(Tool):
 class EditTool(Tool):
     """Edit file by replacing text."""
 
-    def __init__(self, workspace_dir: str = "."):
+    def __init__(self, workspace_dir: str = ".", path_guard=None):
         """Initialize EditTool with workspace directory.
 
         Args:
             workspace_dir: Base directory for resolving relative paths
+            path_guard: Optional PathGuard instance for access control
         """
         self.workspace_dir = Path(workspace_dir).absolute()
+        self.path_guard = path_guard
 
     @property
     def name(self) -> str:
@@ -293,6 +305,9 @@ class EditTool(Tool):
             file_path = Path(path)
             if not file_path.is_absolute():
                 file_path = self.workspace_dir / file_path
+
+            if self.path_guard:
+                self.path_guard.check(file_path, "w")
 
             if not file_path.exists():
                 return ToolResult(success=False, content="", error=f"File not found: {path}")

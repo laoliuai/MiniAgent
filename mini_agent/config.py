@@ -83,6 +83,15 @@ class PathGuardConfig(BaseModel):
     source_whitelist: list[str] = []
 
 
+class WebSearchConfig(BaseModel):
+    """Web search provider configuration"""
+
+    providers: list[str] = ["duckduckgo", "duckduckgo_raw"]
+    tavily_api_key: str = ""
+    baidu_search_api_key: str = ""
+    cache_ttl: int = 300
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration"""
 
@@ -92,6 +101,11 @@ class ToolsConfig(BaseModel):
     enable_note: bool = True
     enable_grep: bool = True
     enable_todo: bool = True
+
+    # Web tools
+    enable_web_search: bool = True
+    enable_web_fetch: bool = True
+    web_search: WebSearchConfig = Field(default_factory=WebSearchConfig)
 
     # Skills
     enable_skills: bool = True
@@ -201,6 +215,10 @@ class Config(BaseModel):
         path_guard_data = tools_data.get("path_guard", {})
         path_guard_config = PathGuardConfig(**path_guard_data)
 
+        # Parse WebSearch configuration
+        web_search_data = tools_data.get("web_search", {})
+        web_search_config = WebSearchConfig(**web_search_data)
+
         tools_config = ToolsConfig(
             enable_file_tools=tools_data.get("enable_file_tools", True),
             enable_bash=tools_data.get("enable_bash", True),
@@ -213,6 +231,9 @@ class Config(BaseModel):
             mcp_config_path=tools_data.get("mcp_config_path", "mcp.json"),
             mcp=mcp_config,
             path_guard=path_guard_config,
+            enable_web_search=tools_data.get("enable_web_search", True),
+            enable_web_fetch=tools_data.get("enable_web_fetch", True),
+            web_search=web_search_config,
         )
 
         # Parse logging configuration

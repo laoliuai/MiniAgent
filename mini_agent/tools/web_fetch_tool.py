@@ -48,16 +48,18 @@ class WebFetchTool(Tool):
                 )
                 resp.raise_for_status()
 
-            content_type = resp.headers.get("content-type", "")
-            if "json" in content_type:
-                text = resp.text[:3000]
-                return ToolResult(success=True, content=f"[web_fetch] {url}\nJSON content:\n{text}")
+                content_type = resp.headers.get("content-type", "")
+                if "json" in content_type:
+                    text = resp.text
+                    if len(text) > 3000:
+                        text = text[:3000] + f"\n\n[...truncated, total {len(text)} chars]"
+                    return ToolResult(success=True, content=f"[web_fetch] {url}\nJSON content:\n{text}")
 
-            text = self._extract_text(resp.text)
-            if len(text) > 3000:
-                text = text[:3000] + f"\n\n[...truncated, total {len(text)} chars]"
+                text = self._extract_text(resp.text)
+                if len(text) > 3000:
+                    text = text[:3000] + f"\n\n[...truncated, total {len(text)} chars]"
 
-            return ToolResult(success=True, content=f"[web_fetch] {url}\n\n{text}")
+                return ToolResult(success=True, content=f"[web_fetch] {url}\n\n{text}")
 
         except httpx.TimeoutException:
             return ToolResult(success=False, content="", error=f"Timeout fetching {url}")

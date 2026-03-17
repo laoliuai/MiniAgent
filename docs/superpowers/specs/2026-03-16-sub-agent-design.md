@@ -81,7 +81,7 @@ class AgentConfig:
 AgentConfig holds what differs per agent (identity, capabilities, limits). Infrastructure dependencies are passed to Agent constructor directly:
 
 | In AgentConfig | In Agent constructor |
-|---|---|
+| --- | --- |
 | agent_id, name, description | llm_client (shared service) |
 | model, system_prompt | workspace_dir (environment) |
 | tools, context_config | shared_state (shared resource) |

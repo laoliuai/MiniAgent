@@ -252,12 +252,7 @@ class DuckDuckGoRawProvider(SearchProvider):
             resp.raise_for_status()
         results = self._parse_ddg_html(resp.text, max_results)
         if not results:
-            results = [SearchResult(
-                title=f"Search results for: {query}",
-                url=f"https://duckduckgo.com/?q={quote_plus(query)}",
-                snippet="Direct search link. Raw fetch could not parse results.",
-                source="duckduckgo_raw",
-            )]
+            raise RuntimeError("DuckDuckGo raw: could not parse results")
         return results
 
     @staticmethod

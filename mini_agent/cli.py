@@ -433,20 +433,26 @@ async def initialize_base_tools(config: Config):
 
     # 5. Web tools
     if config.tools.enable_web_search:
-        from mini_agent.tools.web_search_tool import WebSearchTool, create_providers
-        ws_config = config.tools.web_search
-        providers = create_providers(
-            ws_config.providers,
-            tavily_api_key=ws_config.tavily_api_key,
-            baidu_search_api_key=ws_config.baidu_search_api_key,
-        )
-        tools.append(WebSearchTool(providers=providers, cache_ttl_seconds=ws_config.cache_ttl))
-        print(f"{Colors.GREEN}✅ Loaded WebSearch tool (providers: {ws_config.providers}){Colors.RESET}")
+        try:
+            from mini_agent.tools.web_search_tool import WebSearchTool, create_providers
+            ws_config = config.tools.web_search
+            providers = create_providers(
+                ws_config.providers,
+                tavily_api_key=ws_config.tavily_api_key,
+                baidu_search_api_key=ws_config.baidu_search_api_key,
+            )
+            tools.append(WebSearchTool(providers=providers, cache_ttl_seconds=ws_config.cache_ttl))
+            print(f"{Colors.GREEN}✅ Loaded WebSearch tool (providers: {ws_config.providers}){Colors.RESET}")
+        except Exception as e:
+            print(f"{Colors.YELLOW}⚠️  Failed to load WebSearch tool: {e}{Colors.RESET}")
 
     if config.tools.enable_web_fetch:
-        from mini_agent.tools.web_fetch_tool import WebFetchTool
-        tools.append(WebFetchTool())
-        print(f"{Colors.GREEN}✅ Loaded WebFetch tool{Colors.RESET}")
+        try:
+            from mini_agent.tools.web_fetch_tool import WebFetchTool
+            tools.append(WebFetchTool())
+            print(f"{Colors.GREEN}✅ Loaded WebFetch tool{Colors.RESET}")
+        except Exception as e:
+            print(f"{Colors.YELLOW}⚠️  Failed to load WebFetch tool: {e}{Colors.RESET}")
 
     print()  # Empty line separator
     return tools, skill_loader

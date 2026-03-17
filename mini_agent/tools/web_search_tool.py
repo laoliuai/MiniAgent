@@ -7,7 +7,6 @@ import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
 from urllib.parse import quote_plus, unquote
 
 import httpx
@@ -78,7 +77,7 @@ class SearchProvider(ABC):
 class TavilyProvider(SearchProvider):
     name = "tavily"
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         self.api_key = api_key
 
     def is_available(self) -> bool:
@@ -155,7 +154,7 @@ class DuckDuckGoProvider(SearchProvider):
 class BaiduProvider(SearchProvider):
     name = "baidu"
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         self.api_key = api_key
 
     def is_available(self) -> bool:
@@ -407,7 +406,7 @@ class WebSearchTool(Tool):
         return WebSearchResponse(query=query, results=[], provider="none",
                                   fallback_used=True, error_log=errors)
 
-    def _get_cached(self, query: str) -> Optional[WebSearchResponse]:
+    def _get_cached(self, query: str) -> WebSearchResponse | None:
         key = query.lower().strip()
         if key in self._cache:
             ts, response = self._cache[key]

@@ -51,6 +51,15 @@ tools:
   enable_skills: true      # Enable Skills
   skills_dir: "./skills"   # Skills directory path
   
+  # Web tools
+  enable_web_search: true
+  enable_web_fetch: true
+  web_search:
+    providers: ["duckduckgo", "duckduckgo_raw"]  # Available: tavily, duckduckgo, baidu, baidu_raw, duckduckgo_raw
+    tavily_api_key: ""       # Required for tavily provider
+    baidu_search_api_key: "" # Required for baidu provider
+    cache_ttl: 300           # Cache results for 300 seconds
+
   # MCP Tools
   enable_mcp: true         # Enable MCP tools
   mcp_config_path: "mcp.json"  # MCP configuration file (same config directory)

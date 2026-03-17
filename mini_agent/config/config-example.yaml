@@ -55,7 +55,7 @@ tools:
   enable_web_search: true
   enable_web_fetch: true
   web_search:
-    providers: ["duckduckgo", "duckduckgo_raw"]  # Available: tavily, duckduckgo, baidu, baidu_raw, duckduckgo_raw
+    providers: ["baidu", "duckduckgo_raw"]  # Available: tavily, duckduckgo, baidu, baidu_raw, duckduckgo_raw
     tavily_api_key: ""       # Required for tavily provider
     baidu_search_api_key: "" # Required for baidu provider
     cache_ttl: 300           # Cache results for 300 seconds
